@@ -2,176 +2,189 @@ const { Telegraf, Markup } = require('telegraf');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// قاعدة بيانات لأشهر الألعاب السحابية الخفيفة الجاهزة للتشغيل المباشر داخل تيليجرام
-const gamesLibrary = [
-    { id: '2048', title: '🔢 لعبة 2048 العبقرية', category: 'puzzle', url: 'https://play2048.co/' },
-    { id: 'tetris', title: '🧱 تيتريس كلاسيك (Tetris)', category: 'classic', url: 'https://chvin.github.io/react-tetris/' },
-    { id: 'hextris', title: '🔷 هيكستريس السريعة (Hextris)', category: 'arcade', url: 'https://hextris.io/' },
-    { id: 'snake', title: '🐍 لعبة الثعبان الأصلية (Snake)', category: 'classic', url: 'https://playsnake.org/' },
-    { id: 'pacman', title: '🟡 باك مان (Pac-Man)', category: 'classic', url: 'https://freepacman.org/' },
-    { id: 'doodle', title: '🦘 دودل جمب (Doodle Jump)', category: 'action', url: 'https://apps.thesmartweb.net/doodle-jump/' },
-    { id: 'sudoku', title: '🧩 سودوكو التحدي (Sudoku)', category: 'puzzle', url: 'https://sudoku.com/' },
-    { id: 'chess', title: '♟️ شطرنج عالمي (Chess)', category: 'puzzle', url: 'https://lichess.org/' },
-    { id: 'flappy', title: '🐤 فلابي بيرد (Flappy Bird)', category: 'arcade', url: 'https://flappybird.io/' }
-];
+// توليد رقم غرفة عشوائي مستقل لكل طاولة
+function generateRoomCode() {
+    return Math.floor(100000 + Math.random() * 900000);
+}
 
-// القائمة الرئيسية لمنصة الألعاب
+// قائمة الألعاب المرنة (تتكيف تلقائياً من 2 إلى 4 لاعبين فورياً)
+function getFlexibleGames(roomCode) {
+    return [
+        {
+            id: 'ludo_flex',
+            title: '🎲 لودو التحدي (من 2 إلى 4 لاعبين)',
+            desc: `تبدأ بلاعبين اثنين فقط دون انتظار | كود: ${roomCode}`,
+            url: `https://ludo.party/?room=${roomCode}`
+        },
+        {
+            id: 'uno_flex',
+            title: '🃏 أونو الكروت (من 2 إلى 4 لاعبين)',
+            desc: `تحدي ثنائي فوري أو جماعي | كود: ${roomCode}`,
+            url: `https://play.unofreak.com/?room=${roomCode}`
+        },
+        {
+            id: 'domino_flex',
+            title: '🀄 دومينو حية (من 2 إلى 4 لاعبين)',
+            desc: `رأس برأس أو طاولة رباعية | كود: ${roomCode}`,
+            url: `https://papergames.io/en/dominoes`
+        },
+        {
+            id: 'xo_instant',
+            title: '⚔️ إكس أو السريعة (تحدي ثنائي مباشر)',
+            desc: 'مواجهة فورية بين لاعبين 1v1',
+            url: `https://papergames.io/en/tic-tac-toe`
+        }
+    ];
+}
+
+// القائمة الرئيسية في الخاص
 function getMainMenu() {
     return Markup.inlineKeyboard([
         [
-            Markup.button.webApp('🌐 صالة الألعاب اللانهائية (GameSnacks)', 'https://gamesnacks.com/')
+            Markup.button.switchToChat('📢 إرسال طاولة للقروب (2 - 4 لاعبين)', 'ludo')
         ],
         [
-            Markup.button.callback('🎲 لعبة عشوائية', 'action_random'),
-            Markup.button.callback('📂 تصفح حسب القسم', 'action_categories')
+            Markup.button.callback('🎲 طاولة لودو مرنة (2-4)', 'start_ludo_flex'),
+            Markup.button.callback('🃏 طاولة أونو مرنة (2-4)', 'start_uno_flex')
         ],
         [
-            Markup.button.callback('🔥 الألعاب الأكثر شعبية', 'action_popular'),
-            Markup.button.callback('ℹ️ تعليمات البحث', 'action_help')
+            Markup.button.webApp('🌐 صالة الألعاب الفردية', 'https://gamesnacks.com/'),
+            Markup.button.callback('ℹ️ كيف يبدأ اللعب بثنائي؟', 'action_flex_info')
         ]
     ]);
 }
 
 bot.start((ctx) => {
     return ctx.reply(
-        '🎮 **مرحباً بك في أضخم صالة ألعاب على تيليجرام!**\n\n' +
-        '• اضغط على **صالة الألعاب اللانهائية** لتفتح مئات الألعاب وتلعبها بملء الشاشة.\n' +
-        '• تصفح الألعاب الجاهزة بالأسفل أو اختر لعبة عشوائية.\n' +
-        '• أو اكتب اسم أي لعبة بالدردشة مباشرة وسأحضرها لك!',
+        '🎮 **أهلاً بك في منصة الألعاب التفاعلية المرنة!**\n\n' +
+        '• الطاولات مصممة لتتكيف تلقائياً: **إذا دخل شخصان فقط، يبدأ اللعب فوراً** كرأس برأس.\n' +
+        '• إذا دخل 3 أو 4 لاعبين، تتحول الطاولة تلقائياً إلى تحدٍ جماعي كامل.\n\n' +
+        'اضغط بالأسفل لبدء طاولة أو مشاركتها مع أصدقائك:',
         { parse_mode: 'Markdown', ...getMainMenu() }
     );
 });
 
-// صالة الألعاب الأكثر شعبية
-bot.action('action_popular', async (ctx) => {
-    await ctx.answerCbQuery();
-    const buttons = gamesLibrary.slice(0, 5).map(g => [Markup.button.webApp(g.title, g.url)]);
-    buttons.push([Markup.button.callback('🔙 القائمة الرئيسية', 'menu_main')]);
+// أوامر القروبات المباشرة
+bot.command(['ludo', 'play'], (ctx) => {
+    const room = generateRoomCode();
+    const ludo = getFlexibleGames(room)[0];
 
-    await ctx.editMessageText(
-        '🔥 **أقوى الألعاب السريعة (اختر وابدأ اللعب فوراً داخل الشات):**',
-        { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) }
-    );
-});
-
-// اختيار لعبة عشوائية
-bot.action('action_random', async (ctx) => {
-    await ctx.answerCbQuery();
-    const randomGame = gamesLibrary[Math.floor(Math.random() * gamesLibrary.length)];
-
-    await ctx.reply(
-        `🎲 **وقع الاختيار على:**\n👉 **${randomGame.title}**\n\nاضغط بالأسفل للتشغيل فوراً:`,
+    return ctx.reply(
+        `🎲 **تم إنشاء طاولة لودو مفتوحة!**\n` +
+        `👑 المنشئ: ${ctx.from.first_name}\n` +
+        `🔑 رمز الغرفة: \`${room}\`\n\n` +
+        `⚡ **نظام اللعب:** تتسع من 2 إلى 4 لاعبين.\n` +
+        `👉 بمجرد دخول لاعبين اثنين، يمكن الضغط على **Start** وبدء الجولة مباشرة دون انتظار!`,
         {
             parse_mode: 'Markdown',
             ...Markup.inlineKeyboard([
-                [Markup.button.webApp('🕹️ العب الآن', randomGame.url)],
-                [Markup.button.callback('🔄 اختر لعبة تانية', 'action_random')]
+                [Markup.button.webApp('🕹️ الدخول للطاولة واللعب', ludo.url)],
+                [Markup.button.switchToChat('📢 مشاركة الروم بقروب آخر', 'ludo')]
             ])
         }
     );
 });
 
-// تصنيفات الألعاب
-bot.action('action_categories', async (ctx) => {
+// بدء لودو من المحادثة الخاصة
+bot.action('start_ludo_flex', async (ctx) => {
     await ctx.answerCbQuery();
-    await ctx.editMessageText(
-        '📂 **اختر قسم الألعاب المفضل لديك:**',
-        Markup.inlineKeyboard([
-            [
-                Markup.button.callback('🧠 ذكاء وألغاز', 'cat_puzzle'),
-                Markup.button.callback('🕹️ كلاسيك وريترو', 'cat_classic')
-            ],
-            [
-                Markup.button.callback('⚡ آركيد وسرعة', 'cat_arcade'),
-                Markup.button.webApp('🏎️ سيارات وأكشن', 'https://gamesnacks.com/category/action')
-            ],
-            [Markup.button.callback('🔙 القائمة الرئيسية', 'menu_main')]
-        ])
+    const room = generateRoomCode();
+    const ludoUrl = `https://ludo.party/?room=${room}`;
+
+    await ctx.reply(
+        `🎲 **طاولة لودو جاهزة (2 - 4 لاعبين)!**\n` +
+        `🔑 كود الغرفة: \`${room}\`\n\n` +
+        `💡 يمكنك الدخول والبدء مباشرة بمجرد انضمام صديقك، أو مشاركة الزر مع أصدقاء إضافيين:`,
+        {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+                [Markup.button.webApp('🕹️ دخول الطاولة', ludoUrl)],
+                [Markup.button.switchToChat('📢 إرسال الرابط لصديق / قروب', `ludo_${room}`)],
+                [Markup.button.callback('🔙 القائمة الرئيسية', 'menu_main')]
+            ])
+        }
     );
 });
 
-// عرض ألعاب قسم معين
-bot.action(/cat_(.+)/, async (ctx) => {
+// بدء أونو من المحادثة الخاصة
+bot.action('start_uno_flex', async (ctx) => {
     await ctx.answerCbQuery();
-    const cat = ctx.match[1];
-    const filtered = gamesLibrary.filter(g => g.category === cat);
+    const room = generateRoomCode();
+    const unoUrl = `https://play.unofreak.com/?room=${room}`;
 
-    const buttons = filtered.map(g => [Markup.button.webApp(g.title, g.url)]);
-    buttons.push([Markup.button.callback('🔙 رجوع للأقسام', 'action_categories')]);
-
-    await ctx.editMessageText(
-        `🎮 **ألعاب قسم (${cat}):**\nاضغط على أي لعبة لتشغيلها مباشرة:`,
-        Markup.inlineKeyboard(buttons)
+    await ctx.reply(
+        `🃏 **طاولة أونو جاهزة (2 - 4 لاعبين)!**\n` +
+        `🔑 كود الغرفة: \`${room}\`\n\n` +
+        `💡 تبدأ الجولة فور انضمام شخصين، ويمكن انضمام حتى 4 لاعبين:`,
+        {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+                [Markup.button.webApp('🕹️ دخول اللعبة', unoUrl)],
+                [Markup.button.switchToChat('📢 إرسال الرابط لصديق / قروب', `uno_${room}`)],
+                [Markup.button.callback('🔙 القائمة الرئيسية', 'menu_main')]
+            ])
+        }
     );
 });
 
-// تعليمات البحث
-bot.action('action_help', async (ctx) => {
+// شرح نظام اللعب التكيفي
+bot.action('action_flex_info', async (ctx) => {
     await ctx.answerCbQuery();
     await ctx.editMessageText(
-        '🔍 **كيف تبحث عن أي لعبة؟**\n\n' +
-        'فقط اكتب اسم اللعبة في المحادثة مباشرة، مثل:\n' +
-        '• `شطرنج`\n' +
-        '• `تيتريس`\n' +
-        '• `2048`\n' +
-        '• `ثعبان`\n\n' +
-        'وسيقوم البوت بإرسال بطاقة تشغيل اللعبة فوراً.',
+        '💡 **كيف تعمل الطاولات المرنة؟**\n\n' +
+        '1. عند إنشاء الغرفة، يكون الحد الأقصى 4 لاعبين.\n' +
+        '2. إذا انضم **شخص واحد فقط معك** (أصبحتم 2)، يظهر لك في شاشة اللعبة زر أخضر لبدء اللعبة فوراً كـ 1 ضد 1.\n' +
+        '3. لستم مضطرين لانتظار بقية اللاعبين؛ ابدأوا اللعب فوراً، واللعبة ستغلق المقاعد الفارغة تلقائياً.',
         Markup.inlineKeyboard([[Markup.button.callback('🔙 القائمة الرئيسية', 'menu_main')]])
     );
 });
 
-// العودة للقائمة الرئيسية
+// العودة للقائمة
 bot.action('menu_main', async (ctx) => {
     await ctx.answerCbQuery();
     await ctx.editMessageText(
-        '🎮 **مرحباً بك في أضخم صالة ألعاب على تيليجرام!**\nاختر من القائمة بالأسفل:',
+        '🎮 **منصة ألعاب تيليجرام التفاعلية:**\nاختر من الخيارات بالأسفل:',
         { parse_mode: 'Markdown', ...getMainMenu() }
     );
 });
 
-// البحث اللحظي بالنص
-bot.on('text', async (ctx) => {
-    const query = ctx.message.text.trim().toLowerCase();
-    
-    if (query === '/start') return;
+// دعم الإرسال المباشر لأي محادثة أو قروب (Inline Query)
+bot.on('inline_query', async (ctx) => {
+    const room = generateRoomCode();
+    const games = getFlexibleGames(room);
 
-    // البحث في المكتبة المحلية أولاً
-    const match = gamesLibrary.find(g => 
-        g.title.toLowerCase().includes(query) || g.id.includes(query)
-    );
-
-    if (match) {
-        return ctx.reply(
-            `🎯 وجدنا لعبتك:\n**${match.title}**`,
-            {
-                parse_mode: 'Markdown',
-                ...Markup.inlineKeyboard([
-                    [Markup.button.webApp('🕹️ ابدأ اللعب الآن', match.url)],
-                    [Markup.button.callback('🎮 القائمة الرئيسية', 'menu_main')]
-                ])
-            }
-        );
-    }
-
-    // إذا كانت لعبة أخرى عامة، يوفر لها بحثاً وتشغيلاً مباشراً من البوابة الكبرى
-    const searchUrl = `https://gamesnacks.com/search?q=${encodeURIComponent(query)}`;
-    return ctx.reply(
-        `🔍 لم نجد "${ctx.message.text}" في المفضلة السريعة، لكن يمكنك تشغيلها والبحث عنها في الصالة الكبرى:`,
-        Markup.inlineKeyboard([
-            [Markup.button.webApp(`🔎 تشغيل والبحث عن "${ctx.message.text}"`, searchUrl)],
-            [Markup.button.callback('🔙 القائمة الرئيسية', 'menu_main')]
+    const results = games.map((game, index) => ({
+        type: 'article',
+        id: `flex_${index}_${room}`,
+        title: game.title,
+        description: game.desc,
+        thumb_url: 'https://cdn-icons-png.flaticon.com/512/808/808439.png',
+        input_message_content: {
+            message_text:
+                `⚔️ **دعوة تحدي مفتوحة!**\n\n` +
+                `🎮 اللعبة: **${game.title}**\n` +
+                `👑 منشئ التحدي: ${ctx.from.first_name}\n` +
+                `🔑 رمز الطاولة: \`${room}\`\n\n` +
+                `⚡ **تبدأ اللعبة فور دخول شخصين فقط، وتتسع حتى 4 لاعبين!**\n` +
+                `اضغطوا على الزر بالأسفل للانضمام معاً 👇`,
+            parse_mode: 'Markdown'
+        },
+        reply_markup: Markup.inlineKeyboard([
+            [Markup.button.webApp('🕹️ انضمام إلى الطاولة فوراً', game.url)]
         ])
-    );
+    }));
+
+    return ctx.answerInlineQuery(results, { cache_time: 0 });
 });
 
-// معالج سيرفر Vercel بنظام Webhook المستقر 100%
+// معالج Vercel
 module.exports = async (req, res) => {
     try {
         if (req.method === 'POST') {
             await bot.handleUpdate(req.body);
             return res.status(200).send('OK');
         }
-        return res.status(200).send('Arcade Platform Bot is Live 24/7.');
+        return res.status(200).send('Flexible Multiplayer Bot is active 24/7.');
     } catch (err) {
         return res.status(200).send('OK');
     }
