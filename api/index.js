@@ -5,19 +5,19 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const ADMIN_ID = process.env.ADMIN_ID;
 
-// أمر البداية
+// رسالة البداية
 bot.start((ctx) => {
     ctx.reply('أهلاً بك! أنا بوت ذكاء اصطناعي أعمل بنظام Webhook وسريع الاستجابة.');
 });
 
-// التعامل مع الرسائل
+// التعامل مع الرسائل النصية
 bot.on('text', async (ctx) => {
     const text = ctx.message.text;
 
     try {
         await ctx.sendChatAction('typing');
         const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: 'gemini-1.5-flash',
             contents: text,
         });
 
@@ -28,7 +28,7 @@ bot.on('text', async (ctx) => {
     }
 });
 
-// الدالة المسؤولة عن استقبال رسائل التيليجرام عبر Vercel
+// دالة استقبال وتمرير تحديثات التيليجرام على Vercel
 module.exports = async (req, res) => {
     try {
         if (req.method === 'POST') {
