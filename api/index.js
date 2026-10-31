@@ -1,131 +1,178 @@
-const { Telegraf } = require('telegraf');
+const { Telegraf, Markup } = require('telegraf');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// ذاكرة سريعة لمنع تكرار التحديثات من تيليجرام واستهلاك الحصة المجانية
-const processedUpdates = new Set();
+// قاعدة بيانات لأشهر الألعاب السحابية الخفيفة الجاهزة للتشغيل المباشر داخل تيليجرام
+const gamesLibrary = [
+    { id: '2048', title: '🔢 لعبة 2048 العبقرية', category: 'puzzle', url: 'https://play2048.co/' },
+    { id: 'tetris', title: '🧱 تيتريس كلاسيك (Tetris)', category: 'classic', url: 'https://chvin.github.io/react-tetris/' },
+    { id: 'hextris', title: '🔷 هيكستريس السريعة (Hextris)', category: 'arcade', url: 'https://hextris.io/' },
+    { id: 'snake', title: '🐍 لعبة الثعبان الأصلية (Snake)', category: 'classic', url: 'https://playsnake.org/' },
+    { id: 'pacman', title: '🟡 باك مان (Pac-Man)', category: 'classic', url: 'https://freepacman.org/' },
+    { id: 'doodle', title: '🦘 دودل جمب (Doodle Jump)', category: 'action', url: 'https://apps.thesmartweb.net/doodle-jump/' },
+    { id: 'sudoku', title: '🧩 سودوكو التحدي (Sudoku)', category: 'puzzle', url: 'https://sudoku.com/' },
+    { id: 'chess', title: '♟️ شطرنج عالمي (Chess)', category: 'puzzle', url: 'https://lichess.org/' },
+    { id: 'flappy', title: '🐤 فلابي بيرد (Flappy Bird)', category: 'arcade', url: 'https://flappybird.io/' }
+];
 
-// دعم مفتاح واحد أو عدة مفاتيح مفصولة بفاصلة لمضاعفة حد الاستخدام
-function getApiKeys() {
-    const raw = process.env.GEMINI_API_KEY || '';
-    return raw.split(',').map(k => k.trim()).filter(Boolean);
-}
-
-let keyIndex = 0;
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-async function requestGemini(prompt, apiKey) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 25000);
-
-    try {
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            signal: controller.signal,
-            body: JSON.stringify({
-                contents: [{ parts: [{ text: prompt }] }]
-            })
-        });
-
-        clearTimeout(timeout);
-        const data = await response.json();
-        return { status: response.status, ok: response.ok, data };
-    } catch (err) {
-        clearTimeout(timeout);
-        return { status: 0, ok: false, error: err };
-    }
-}
-
-async function askGemini(prompt) {
-    const keys = getApiKeys();
-    if (keys.length === 0) {
-        return '⚠️ خطأ: لم يتم ضبط GEMINI_API_KEY في إعدادات Vercel.';
-    }
-
-    // تجربة المفاتيح المتاحة بالتناوب في حال تجاوز حد أحدهم
-    for (let i = 0; i < keys.length; i++) {
-        const apiKey = keys[(keyIndex + i) % keys.length];
-
-        // محاولتان لكل مفتاح في حال وجود ضغط لحظي (503)
-        for (let attempt = 1; attempt <= 2; attempt++) {
-            const res = await requestGemini(prompt, apiKey);
-
-            // استلام الرد بنجاح
-            if (res.ok && res.data?.candidates?.[0]?.content?.parts) {
-                keyIndex = (keyIndex + i + 1) % keys.length;
-                const parts = res.data.candidates[0].content.parts;
-                const text = parts.filter(p => !p.thought && p.text).map(p => p.text).join('\n') || parts[0]?.text;
-                if (text) return text;
-            }
-
-            // ضغط مؤقت على سيرفر غوغل (503)
-            if (res.status === 503 && attempt === 1) {
-                await sleep(2000);
-                continue;
-            }
-
-            // استنفاد حد الـ 5 رسائل (429)
-            if (res.status === 429) {
-                if (keys.length > 1 && i < keys.length - 1) {
-                    break; // الانتقال للمفتاح الاحتياطي التالي مباشرة
-                }
-                return '⏳ استهلكت حد الرسائل المجاني (5 رسائل/دقيقة). انتظر 20 ثانية ثم أرسل سؤالك.';
-            }
-
-            if (attempt === 2 || (res.status !== 503 && res.status !== 429)) {
-                break;
-            }
-        }
-    }
-
-    return '⚡ سيرفرات الذكاء الاصطناعي تشهد ضغطاً مؤقتاً، يرجى إعادة المحاولة بعد لحظات.';
+// القائمة الرئيسية لمنصة الألعاب
+function getMainMenu() {
+    return Markup.inlineKeyboard([
+        [
+            Markup.button.webApp('🌐 صالة الألعاب اللانهائية (GameSnacks)', 'https://gamesnacks.com/')
+        ],
+        [
+            Markup.button.callback('🎲 لعبة عشوائية', 'action_random'),
+            Markup.button.callback('📂 تصفح حسب القسم', 'action_categories')
+        ],
+        [
+            Markup.button.callback('🔥 الألعاب الأكثر شعبية', 'action_popular'),
+            Markup.button.callback('ℹ️ تعليمات البحث', 'action_help')
+        ]
+    ]);
 }
 
 bot.start((ctx) => {
-    return ctx.reply('أهلاً بك! أنا بوت ذكاء اصطناعي أعمل 24/7. اسألني أي شيء وسأجيبك فوراً.');
+    return ctx.reply(
+        '🎮 **مرحباً بك في أضخم صالة ألعاب على تيليجرام!**\n\n' +
+        '• اضغط على **صالة الألعاب اللانهائية** لتفتح مئات الألعاب وتلعبها بملء الشاشة.\n' +
+        '• تصفح الألعاب الجاهزة بالأسفل أو اختر لعبة عشوائية.\n' +
+        '• أو اكتب اسم أي لعبة بالدردشة مباشرة وسأحضرها لك!',
+        { parse_mode: 'Markdown', ...getMainMenu() }
+    );
 });
 
-bot.on('text', async (ctx) => {
-    try {
-        ctx.sendChatAction('typing').catch(() => {});
-        const reply = await askGemini(ctx.message.text);
+// صالة الألعاب الأكثر شعبية
+bot.action('action_popular', async (ctx) => {
+    await ctx.answerCbQuery();
+    const buttons = gamesLibrary.slice(0, 5).map(g => [Markup.button.webApp(g.title, g.url)]);
+    buttons.push([Markup.button.callback('🔙 القائمة الرئيسية', 'menu_main')]);
 
-        if (reply && reply.length > 4000) {
-            for (let i = 0; i < reply.length; i += 4000) {
-                await ctx.reply(reply.slice(i, i + 4000));
-            }
-        } else {
-            await ctx.reply(reply || 'لم يتم استلام رد، حاول مرة ثانية.');
+    await ctx.editMessageText(
+        '🔥 **أقوى الألعاب السريعة (اختر وابدأ اللعب فوراً داخل الشات):**',
+        { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) }
+    );
+});
+
+// اختيار لعبة عشوائية
+bot.action('action_random', async (ctx) => {
+    await ctx.answerCbQuery();
+    const randomGame = gamesLibrary[Math.floor(Math.random() * gamesLibrary.length)];
+
+    await ctx.reply(
+        `🎲 **وقع الاختيار على:**\n👉 **${randomGame.title}**\n\nاضغط بالأسفل للتشغيل فوراً:`,
+        {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+                [Markup.button.webApp('🕹️ العب الآن', randomGame.url)],
+                [Markup.button.callback('🔄 اختر لعبة تانية', 'action_random')]
+            ])
         }
-    } catch (err) {
-        console.error(err);
-        await ctx.reply('تعذر إرسال الإجابة، يرجى المحاولة لاحقاً.');
-    }
+    );
 });
 
+// تصنيفات الألعاب
+bot.action('action_categories', async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.editMessageText(
+        '📂 **اختر قسم الألعاب المفضل لديك:**',
+        Markup.inlineKeyboard([
+            [
+                Markup.button.callback('🧠 ذكاء وألغاز', 'cat_puzzle'),
+                Markup.button.callback('🕹️ كلاسيك وريترو', 'cat_classic')
+            ],
+            [
+                Markup.button.callback('⚡ آركيد وسرعة', 'cat_arcade'),
+                Markup.button.webApp('🏎️ سيارات وأكشن', 'https://gamesnacks.com/category/action')
+            ],
+            [Markup.button.callback('🔙 القائمة الرئيسية', 'menu_main')]
+        ])
+    );
+});
+
+// عرض ألعاب قسم معين
+bot.action(/cat_(.+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const cat = ctx.match[1];
+    const filtered = gamesLibrary.filter(g => g.category === cat);
+
+    const buttons = filtered.map(g => [Markup.button.webApp(g.title, g.url)]);
+    buttons.push([Markup.button.callback('🔙 رجوع للأقسام', 'action_categories')]);
+
+    await ctx.editMessageText(
+        `🎮 **ألعاب قسم (${cat}):**\nاضغط على أي لعبة لتشغيلها مباشرة:`,
+        Markup.inlineKeyboard(buttons)
+    );
+});
+
+// تعليمات البحث
+bot.action('action_help', async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.editMessageText(
+        '🔍 **كيف تبحث عن أي لعبة؟**\n\n' +
+        'فقط اكتب اسم اللعبة في المحادثة مباشرة، مثل:\n' +
+        '• `شطرنج`\n' +
+        '• `تيتريس`\n' +
+        '• `2048`\n' +
+        '• `ثعبان`\n\n' +
+        'وسيقوم البوت بإرسال بطاقة تشغيل اللعبة فوراً.',
+        Markup.inlineKeyboard([[Markup.button.callback('🔙 القائمة الرئيسية', 'menu_main')]])
+    );
+});
+
+// العودة للقائمة الرئيسية
+bot.action('menu_main', async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.editMessageText(
+        '🎮 **مرحباً بك في أضخم صالة ألعاب على تيليجرام!**\nاختر من القائمة بالأسفل:',
+        { parse_mode: 'Markdown', ...getMainMenu() }
+    );
+});
+
+// البحث اللحظي بالنص
+bot.on('text', async (ctx) => {
+    const query = ctx.message.text.trim().toLowerCase();
+    
+    if (query === '/start') return;
+
+    // البحث في المكتبة المحلية أولاً
+    const match = gamesLibrary.find(g => 
+        g.title.toLowerCase().includes(query) || g.id.includes(query)
+    );
+
+    if (match) {
+        return ctx.reply(
+            `🎯 وجدنا لعبتك:\n**${match.title}**`,
+            {
+                parse_mode: 'Markdown',
+                ...Markup.inlineKeyboard([
+                    [Markup.button.webApp('🕹️ ابدأ اللعب الآن', match.url)],
+                    [Markup.button.callback('🎮 القائمة الرئيسية', 'menu_main')]
+                ])
+            }
+        );
+    }
+
+    // إذا كانت لعبة أخرى عامة، يوفر لها بحثاً وتشغيلاً مباشراً من البوابة الكبرى
+    const searchUrl = `https://gamesnacks.com/search?q=${encodeURIComponent(query)}`;
+    return ctx.reply(
+        `🔍 لم نجد "${ctx.message.text}" في المفضلة السريعة، لكن يمكنك تشغيلها والبحث عنها في الصالة الكبرى:`,
+        Markup.inlineKeyboard([
+            [Markup.button.webApp(`🔎 تشغيل والبحث عن "${ctx.message.text}"`, searchUrl)],
+            [Markup.button.callback('🔙 القائمة الرئيسية', 'menu_main')]
+        ])
+    );
+});
+
+// معالج سيرفر Vercel بنظام Webhook المستقر 100%
 module.exports = async (req, res) => {
     try {
-        if (req.method === 'POST' && req.body) {
-            const updateId = req.body.update_id;
-            if (updateId) {
-                if (processedUpdates.has(updateId)) {
-                    return res.status(200).send('OK');
-                }
-                processedUpdates.add(updateId);
-                if (processedUpdates.size > 150) {
-                    const firstItem = processedUpdates.values().next().value;
-                    processedUpdates.delete(firstItem);
-                }
-            }
-
+        if (req.method === 'POST') {
             await bot.handleUpdate(req.body);
             return res.status(200).send('OK');
         }
-        return res.status(200).send('Bot is live and running 24/7 on Vercel.');
+        return res.status(200).send('Arcade Platform Bot is Live 24/7.');
     } catch (err) {
-        console.error(err);
         return res.status(200).send('OK');
     }
 };
