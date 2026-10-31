@@ -63,7 +63,7 @@ bot.command('addpro', (ctx) => {
     if (!db.proUsers.includes(targetId)) {
         db.proUsers.push(targetId);
         saveDB(db);
-        ctx.reply(`تمت إضافة ${targetId} للـ Pro بنجاح.`);
+        ctx.reply(`تمت إضافة ${targetId} بنجاح.`);
     } else {
         ctx.reply('المستخدم موجود مسبقاً.');
     }
@@ -71,14 +71,9 @@ bot.command('addpro', (ctx) => {
 
 bot.on('text', async (ctx) => {
     const userId = ctx.from.id.toString();
-    const db = loadDB();
     
-    // استخدام النماذج المستقرة المعتمدة
-    let modelName = 'gemini-1.5-flash';
-
-    if (userId === ADMIN_ID || db.proUsers.includes(userId)) {
-        modelName = 'gemini-1.5-pro';
-    }
+    // استخدام النموذج المدعوم والمستقر 100%
+    const modelName = 'gemini-1.5-flash';
 
     const usageCheck = checkAndUpdateUsage(userId);
     if (!usageCheck.allowed) {
