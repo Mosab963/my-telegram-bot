@@ -10,8 +10,9 @@ async function askGemini(prompt) {
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
 
+    // مهلة أمان قصوى 50 ثانية لمنع أي انقطاع ذاتي
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
+    const timeout = setTimeout(() => controller.abort(), 50000);
 
     try {
         const response = await fetch(url, {
@@ -21,11 +22,11 @@ async function askGemini(prompt) {
             body: JSON.stringify({
                 contents: [{ parts: [{ text: prompt }] }],
                 generationConfig: {
-                    // تسريع الاستجابة للحد الأقصى وإلغاء تأخير التفكير المعقد
+                    temperature: 0.7,
+                    maxOutputTokens: 1000,
                     thinkingConfig: {
-                        thinkingLevel: "LOW"
-                    },
-                    maxOutputTokens: 1000
+                        thinkingBudget: 0 // إيقاف التفكير كلياً لتوليد الرد فوراً خلال ثوانٍ معدودة
+                    }
                 }
             })
         });
@@ -34,18 +35,17 @@ async function askGemini(prompt) {
         const data = await response.json();
 
         if (response.status === 429) {
-            return '⏳ تجاوزت الحد المسموح للخطة المجانية (5 رسائل/دقيقة). انتظر نصف دقيقة ثم أرسل سؤالك.';
+            return '⏳ تجاوزت حد الرسائل المجاني مؤقتاً (5 رسائل/دقيقة). انتظر نصف دقيقة وجرب مجدداً.';
         }
 
         if (response.status === 503) {
-            return '⚡ سيرفرات غوغل تواجه ضغطاً مؤقتاً، يرجى المحاولة بعد قليل.';
+            return '⚡ ضغط مؤقت على سيرفرات غوغل، أعد إرسال سؤالك الآن.';
         }
 
         if (!response.ok || data.error) {
-            return `خطأ من السيرفر (${response.status}):\n${data.error ? data.error.message : 'تعذر إتمام الطلب'}`;
+            return `خطأ من غوغل (${response.status}):\n${data.error ? data.error.message : 'تعذر إتمام الطلب'}`;
         }
 
-        // استخراج الرد النهائي وتخطي مسودات التفكير
         if (data.candidates && data.candidates[0]?.content?.parts) {
             const parts = data.candidates[0].content.parts;
             const textPart = parts.find(p => !p.thought && p.text) || parts.find(p => p.text);
@@ -54,11 +54,11 @@ async function askGemini(prompt) {
             }
         }
 
-        return 'لم يتم استلام نص، يرجى إعادة صياغة السؤال.';
+        return 'لم يتم استلام نص، يرجى إعادة إرسال السؤال.';
     } catch (err) {
         clearTimeout(timeout);
         if (err.name === 'AbortError') {
-            return 'استغرق الرد وقتاً أطول من المعتاد، حاول مجدداً.';
+            return 'استغرق السيرفر وقتاً طويلاً في المعالجة، حاول مجدداً.';
         }
         return `خطأ داخلي:\n${err.message}`;
     }
