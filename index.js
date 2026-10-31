@@ -72,8 +72,8 @@ bot.command('addpro', (ctx) => {
 bot.on('text', async (ctx) => {
     const userId = ctx.from.id.toString();
     
-    // استخدام النموذج المدعوم والمستقر 100%
-    const modelName = 'gemini-1.5-flash';
+    // النموذج الأحدث المعتمد مباشرة من خوادم Google
+    const modelName = 'gemini-3.1-pro-preview';
 
     const usageCheck = checkAndUpdateUsage(userId);
     if (!usageCheck.allowed) {
