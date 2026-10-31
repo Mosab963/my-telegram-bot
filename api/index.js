@@ -2,72 +2,63 @@ const { Telegraf } = require('telegraf');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// دالة الاتصال مع ميزة التبديل الذكي الصامت بين النماذج
+// منع تيليجرام من إعادة إرسال نفس الرسالة واستهلاك الرصيد المجاني
+const processedUpdates = new Set();
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function callModel(model, prompt, apiKey) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }]
+        })
+    });
+
+    const data = await response.json();
+    return { status: response.status, ok: response.ok, data };
+}
+
 async function askGemini(prompt) {
     const apiKey = (process.env.GEMINI_API_KEY || '').trim();
     if (!apiKey) {
-        return 'خطأ: لم يتم ضبط GEMINI_API_KEY في إعدادات Vercel.';
+        return 'خطأ: لم يتم ضبط GEMINI_API_KEY في Vercel.';
     }
 
-    // قائمة نماذج مجانية وسريعة مرتبة كخطط بديلة فورية
-    const candidateModels = [
-        'gemini-3.8-flash',
-        'gemini-2.0-flash',
-        'gemini-2.0-flash-lite'
-    ];
+    // النماذج المعتمدة للحسابات الجديدة (الأساسي + البديل المجاني المفتوح عند امتلاء الحد)
+    const models = ['gemini-3.8-flash', 'gemma-3-27b-it', 'gemma-3-12b-it'];
+    let lastError = '';
 
-    for (const model of candidateModels) {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 12000);
-
+    for (const model of models) {
         try {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+            let res = await callModel(model, prompt, apiKey);
 
-            const isThinkingModel = model.includes('3.') || model.includes('thinking');
-            const payload = {
-                contents: [{ parts: [{ text: prompt }] }],
-                generationConfig: {
-                    temperature: 0.7,
-                    maxOutputTokens: 1000,
-                    ...(isThinkingModel ? { thinkingConfig: { thinkingBudget: 0 } } : {})
-                }
-            };
-
-            const response = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                signal: controller.signal,
-                body: JSON.stringify(payload)
-            });
-
-            clearTimeout(timeout);
-            const data = await response.json();
-
-            // إذا كان النموذج مضغوطاً أو استنفد حد الدقيقة، يتم تخطيه والانتقال للنموذج التالي فوراً
-            if (!response.ok || data.error) {
-                console.warn(`النموذج ${model} واجه مشكلة، جاري التحويل للبديل...`);
-                continue;
+            // إذا كان هناك ضغط لحظي (503) نعيد المحاولة مرة واحدة بعد ثانيتين
+            if (res.status === 503) {
+                await sleep(2000);
+                res = await callModel(model, prompt, apiKey);
             }
 
-            if (data.candidates && data.candidates[0]?.content?.parts) {
-                const parts = data.candidates[0].content.parts;
-                const textPart = parts.find(p => !p.thought && p.text) || parts.find(p => p.text);
-                if (textPart && textPart.text) {
-                    return textPart.text;
-                }
+            if (res.ok && res.data.candidates && res.data.candidates[0]?.content?.parts) {
+                const parts = res.data.candidates[0].content.parts;
+                const answer = parts.filter(p => !p.thought && p.text).map(p => p.text).join('\n') || parts[0]?.text;
+                if (answer) return answer;
             }
+
+            lastError = `${res.status}: ${res.data.error?.message || 'Unknown error'}`;
         } catch (err) {
-            clearTimeout(timeout);
-            console.warn(`تعذر استدعاء ${model}، جاري تجربة نموذج آخر...`);
-            continue;
+            lastError = err.message;
         }
     }
 
-    return 'سيرفرات الذكاء الاصطناعي مضغوطة حالياً، يرجى إعادة إرسال سؤالك بعد لحظات.';
+    return `تعذر الحصول على رد حالياً (${lastError})`;
 }
 
 bot.start((ctx) => {
-    return ctx.reply('أهلاً بك! البوت جاهز للاستخدام الفوري والسريع 24/7. اسألني أي شيء!');
+    return ctx.reply('أهلاً بك! البوت متصل وجاهز للرد على أسئلتك.');
 });
 
 bot.on('text', async (ctx) => {
@@ -83,19 +74,31 @@ bot.on('text', async (ctx) => {
             await ctx.reply(reply);
         }
     } catch (err) {
-        await ctx.reply('تعذر إرسال الرد، حاول مجدداً.');
+        await ctx.reply('حدث خطأ أثناء إرسال الرد.');
     }
 });
 
 module.exports = async (req, res) => {
     try {
-        if (req.method === 'POST') {
+        if (req.method === 'POST' && req.body) {
+            const updateId = req.body.update_id;
+            if (updateId && processedUpdates.has(updateId)) {
+                return res.status(200).send('OK');
+            }
+            if (updateId) {
+                processedUpdates.add(updateId);
+                if (processedUpdates.size > 200) {
+                    const first = processedUpdates.values().next().value;
+                    processedUpdates.delete(first);
+                }
+            }
+
             await bot.handleUpdate(req.body);
             return res.status(200).send('OK');
         }
-        return res.status(200).send('Bot is live and resilient 24/7.');
+        return res.status(200).send('Bot is running 24/7.');
     } catch (err) {
-        return res.status(200).send('OK'); // تأكيد استلام دائم لتيليجرام لمنع إعادة المحاولات
+        return res.status(200).send('OK');
     }
 };
 
