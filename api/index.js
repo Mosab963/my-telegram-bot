@@ -2,70 +2,72 @@ const { Telegraf } = require('telegraf');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
+// دالة الاتصال مع ميزة التبديل الذكي الصامت بين النماذج
 async function askGemini(prompt) {
     const apiKey = (process.env.GEMINI_API_KEY || '').trim();
     if (!apiKey) {
-        return 'خطأ: لم يتم ضبط GEMINI_API_KEY في Vercel.';
+        return 'خطأ: لم يتم ضبط GEMINI_API_KEY في إعدادات Vercel.';
     }
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`;
+    // قائمة نماذج مجانية وسريعة مرتبة كخطط بديلة فورية
+    const candidateModels = [
+        'gemini-3.8-flash',
+        'gemini-2.0-flash',
+        'gemini-2.0-flash-lite'
+    ];
 
-    // مهلة أمان قصوى 50 ثانية لمنع أي انقطاع ذاتي
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 50000);
+    for (const model of candidateModels) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 12000);
 
-    try {
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            signal: controller.signal,
-            body: JSON.stringify({
+        try {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+            const isThinkingModel = model.includes('3.') || model.includes('thinking');
+            const payload = {
                 contents: [{ parts: [{ text: prompt }] }],
                 generationConfig: {
                     temperature: 0.7,
                     maxOutputTokens: 1000,
-                    thinkingConfig: {
-                        thinkingBudget: 0 // إيقاف التفكير كلياً لتوليد الرد فوراً خلال ثوانٍ معدودة
-                    }
+                    ...(isThinkingModel ? { thinkingConfig: { thinkingBudget: 0 } } : {})
                 }
-            })
-        });
+            };
 
-        clearTimeout(timeout);
-        const data = await response.json();
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                signal: controller.signal,
+                body: JSON.stringify(payload)
+            });
 
-        if (response.status === 429) {
-            return '⏳ تجاوزت حد الرسائل المجاني مؤقتاً (5 رسائل/دقيقة). انتظر نصف دقيقة وجرب مجدداً.';
-        }
+            clearTimeout(timeout);
+            const data = await response.json();
 
-        if (response.status === 503) {
-            return '⚡ ضغط مؤقت على سيرفرات غوغل، أعد إرسال سؤالك الآن.';
-        }
-
-        if (!response.ok || data.error) {
-            return `خطأ من غوغل (${response.status}):\n${data.error ? data.error.message : 'تعذر إتمام الطلب'}`;
-        }
-
-        if (data.candidates && data.candidates[0]?.content?.parts) {
-            const parts = data.candidates[0].content.parts;
-            const textPart = parts.find(p => !p.thought && p.text) || parts.find(p => p.text);
-            if (textPart && textPart.text) {
-                return textPart.text;
+            // إذا كان النموذج مضغوطاً أو استنفد حد الدقيقة، يتم تخطيه والانتقال للنموذج التالي فوراً
+            if (!response.ok || data.error) {
+                console.warn(`النموذج ${model} واجه مشكلة، جاري التحويل للبديل...`);
+                continue;
             }
-        }
 
-        return 'لم يتم استلام نص، يرجى إعادة إرسال السؤال.';
-    } catch (err) {
-        clearTimeout(timeout);
-        if (err.name === 'AbortError') {
-            return 'استغرق السيرفر وقتاً طويلاً في المعالجة، حاول مجدداً.';
+            if (data.candidates && data.candidates[0]?.content?.parts) {
+                const parts = data.candidates[0].content.parts;
+                const textPart = parts.find(p => !p.thought && p.text) || parts.find(p => p.text);
+                if (textPart && textPart.text) {
+                    return textPart.text;
+                }
+            }
+        } catch (err) {
+            clearTimeout(timeout);
+            console.warn(`تعذر استدعاء ${model}، جاري تجربة نموذج آخر...`);
+            continue;
         }
-        return `خطأ داخلي:\n${err.message}`;
     }
+
+    return 'سيرفرات الذكاء الاصطناعي مضغوطة حالياً، يرجى إعادة إرسال سؤالك بعد لحظات.';
 }
 
 bot.start((ctx) => {
-    return ctx.reply('أهلاً بك! البوت جاهز للاستخدام الفوري والسريع. تفضل بإرسال سؤالك!');
+    return ctx.reply('أهلاً بك! البوت جاهز للاستخدام الفوري والسريع 24/7. اسألني أي شيء!');
 });
 
 bot.on('text', async (ctx) => {
@@ -81,7 +83,7 @@ bot.on('text', async (ctx) => {
             await ctx.reply(reply);
         }
     } catch (err) {
-        await ctx.reply('تعذر إرسال الرسالة.');
+        await ctx.reply('تعذر إرسال الرد، حاول مجدداً.');
     }
 });
 
@@ -91,9 +93,9 @@ module.exports = async (req, res) => {
             await bot.handleUpdate(req.body);
             return res.status(200).send('OK');
         }
-        return res.status(200).send('Bot is live and fast.');
+        return res.status(200).send('Bot is live and resilient 24/7.');
     } catch (err) {
-        return res.status(500).send('Error');
+        return res.status(200).send('OK'); // تأكيد استلام دائم لتيليجرام لمنع إعادة المحاولات
     }
 };
 
