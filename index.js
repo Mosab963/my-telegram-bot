@@ -72,10 +72,12 @@ bot.command('addpro', (ctx) => {
 bot.on('text', async (ctx) => {
     const userId = ctx.from.id.toString();
     const db = loadDB();
-    let modelName = 'gemini-2.5-flash';
+    
+    // استخدام النماذج المستقرة المعتمدة
+    let modelName = 'gemini-1.5-flash';
 
     if (userId === ADMIN_ID || db.proUsers.includes(userId)) {
-        modelName = 'gemini-2.5-pro';
+        modelName = 'gemini-1.5-pro';
     }
 
     const usageCheck = checkAndUpdateUsage(userId);
