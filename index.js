@@ -3,6 +3,7 @@ const { GoogleGenAI } = require('@google/genai');
 const fs = require('fs');
 const express = require('express');
 
+// سيرفر ويب داخلي لإبقاء الخدمة نشطة على Render
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -14,12 +15,14 @@ app.listen(PORT, () => {
     console.log(`Web server is running on port ${PORT}`);
 });
 
+// تهيئة البوت ونموذج الذكاء الاصطناعي
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const ADMIN_ID = process.env.ADMIN_ID;
 
 const DB_FILE = './users.json';
 
+// تحميل قاعدة البيانات المحلية
 function loadDB() {
     if (!fs.existsSync(DB_FILE)) {
         fs.writeFileSync(DB_FILE, JSON.stringify({ proUsers: [], usage: {} }, null, 2));
@@ -27,10 +30,12 @@ function loadDB() {
     return JSON.parse(fs.readFileSync(DB_FILE));
 }
 
+// حفظ قاعدة البيانات المحلية
 function saveDB(data) {
     fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
 }
 
+// فحص وتحديث الحد اليومي للرسائل
 function checkAndUpdateUsage(userId) {
     const db = loadDB();
     const today = new Date().toISOString().split('T')[0];
@@ -39,6 +44,7 @@ function checkAndUpdateUsage(userId) {
         db.usage[userId] = { date: today, count: 0 };
     }
 
+    // الحد اليومي: 5 للمجاني، و100 للأدمن والمشتركين المضافين
     let limit = 5; 
     if (userId.toString() === ADMIN_ID || db.proUsers.includes(userId.toString())) {
         limit = 100; 
@@ -53,31 +59,37 @@ function checkAndUpdateUsage(userId) {
     return { allowed: true, remaining: limit - db.usage[userId].count };
 }
 
+// أمر خاص بالأدمن لرفع حد الرسائل لأي مستخدم
 bot.command('addpro', (ctx) => {
-    if (ctx.from.id.toString() !== ADMIN_ID) return ctx.reply('للمدير فقط.');
+    if (ctx.from.id.toString() !== ADMIN_ID) {
+        return ctx.reply('هذا الأمر مخصص للمدير فقط.');
+    }
     const args = ctx.message.text.split(' ');
-    if (args.length < 2) return ctx.reply('استخدم: /addpro [ID]');
+    if (args.length < 2) {
+        return ctx.reply('طريقة الاستخدام: /addpro [ID]');
+    }
     
     const db = loadDB();
     const targetId = args[1];
     if (!db.proUsers.includes(targetId)) {
         db.proUsers.push(targetId);
         saveDB(db);
-        ctx.reply(`تمت إضافة ${targetId} بنجاح.`);
+        ctx.reply(`تمت إضافة المستخدم ${targetId} بنجاح إلى القائمة الخاصة.`);
     } else {
-        ctx.reply('المستخدم موجود مسبقاً.');
+        ctx.reply('المستخدم موجود مسبقاً في القائمة.');
     }
 });
 
+// التعامل مع الرسائل النصية
 bot.on('text', async (ctx) => {
     const userId = ctx.from.id.toString();
     
-    // النموذج الأحدث المعتمد مباشرة من خوادم Google
-    const modelName = 'gemini-3.1-pro-preview';
+    // استخدام نموذج الفلاش السريع والمجاني بدون قيود
+    const modelName = 'gemini-2.5-flash';
 
     const usageCheck = checkAndUpdateUsage(userId);
     if (!usageCheck.allowed) {
-        return ctx.reply(`عذراً، خلص رصيدك اليومي (${usageCheck.limit} رسائل).`);
+        return ctx.reply(`عذراً، لقد استنفدت رصيدك اليومي (${usageCheck.limit} رسائل). يتجدد الرصيد غداً.`);
     }
 
     try {
@@ -89,9 +101,10 @@ bot.on('text', async (ctx) => {
         await ctx.reply(response.text);
     } catch (err) {
         console.error(err);
-        await ctx.reply('صار في خطأ تقني، حاول مرة تانية.');
+        await ctx.reply('حدث خطأ تقني، يرجى المحاولة مرة أخرى.');
     }
 });
 
+// تشغيل البوت
 bot.launch();
 console.log('Telegram Bot is running...');
