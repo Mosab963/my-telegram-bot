@@ -539,7 +539,16 @@ bot.action(/^discount:(.+)$/, async (ctx) => {
     const sec = sections.find((s) => s.id === id);
     await safeAnswer(ctx);
     if (!sec) return safeEdit(ctx, 'هاد القسم مو موجود.', homeKeyboard());
-    return ctx.reply(`🎟️ **كود خصم**\n\nالخدمة: ${sec.title}\nالسعر: ${sec.price || '-'}\n\nأرسل كود الخصم:\n\nمعرف الخدمة: ${sec.id}`, { parse_mode: 'Markdown', ...Markup.forceReply() });
+    // The service id contains an underscore (sec_offer1), which breaks
+    // Telegram Markdown parsing when bare, so it must be inside backticks.
+    // Same class of bug as the pay prompt in PR #15.
+    const promptText = `🎟️ **كود خصم**\n\nالخدمة: ${sec.title}\nالسعر: ${sec.price || '-'}\n\nأرسل كود الخصم:\n\nمعرف الخدمة: \`${sec.id}\``;
+    try {
+        return await ctx.reply(promptText, { parse_mode: 'Markdown', ...Markup.forceReply() });
+    } catch (e) {
+        // If Telegram still rejects the formatting, send it plain.
+        return ctx.reply(promptText.replace(/[*`]/g, ''), Markup.forceReply());
+    }
 });
 
 bot.action(/^order:(.+)$/, async (ctx) => {
@@ -1081,7 +1090,7 @@ bot.on('text', async (ctx, next) => {
         // Replying to the discount-code prompt -> validate the code
         if (replied.includes('أرسل كود الخصم')) {
             const m = replied.match(/معرف الخدمة:\s*(\S+)/);
-            const secId = m ? m[1].trim() : '';
+            const secId = m ? m[1].replace(/`/g, '').trim() : '';
             const { sections } = loadSections();
             const sec = sections.find((s) => s.id === secId);
             if (!sec) return ctx.reply('الخدمة مو موجودة، ابدأ من جديد بأمر /start');
