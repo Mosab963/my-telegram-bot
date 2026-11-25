@@ -134,6 +134,10 @@ async function safeEdit(ctx, text, extra) {
         const msg = String(e && e.message || '');
         if (msg.includes('message is not modified')) return true;
         try { await ctx.reply(text, opts); } catch (_) {}
+        // Last resort: plain text with no parse_mode, so a Markdown parse
+        // error (e.g. a bare underscore in an id) can never leave the user
+        // stuck with only a toast and no message.
+        try { await ctx.reply(text.replace(/[*_`]/g, ''), { ...(extra || {}) }); } catch (_) {}
         return false;
     }
 }
@@ -291,7 +295,7 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
     const id = ctx.match[1];
     const { sections } = loadSections();
     const sec = sections.find((s) => s.id === id);
-    await safeAnswer(ctx, 'تم تأكيد الدفع');
+    await safeAnswer(ctx, 'أرسل رقم المعاملة');
     if (!sec) return safeEdit(ctx, 'هاد القسم مو موجود.', homeKeyboard());
     // Create the pending order NOW, so the next plain message from the user
     // (reply or not) can be recognised as the transaction number.
@@ -307,7 +311,7 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
     saveJSON(ORDERS_FILE, ordersData);
     // Edit the SAME payment message in place to ask for the transaction number.
     return safeEdit(ctx,
-        `💳 **تأكيد الدفع**\n\nالخدمة: ${sec.title}\nالسعر: ${sec.price || ''}\nرقم الطلب: \`${orderId}\`\nمعرف الخدمة: ${sec.id}\n\nأرسل رقم المعاملة:`,
+        `💳 **تأكيد الدفع**\n\nالخدمة: ${sec.title}\nالسعر: ${sec.price || ''}\nرقم الطلب: \`${orderId}\`\n\nأرسل رقم المعاملة:`,
         Markup.inlineKeyboard([
             [Markup.button.callback('❌ إلغاء الطلب', 'cancel')]
         ]));
