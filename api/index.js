@@ -144,6 +144,32 @@ function customerLine(o) {
     return `الزبون: ${name} (${user})\nآيدي الزبون: ${o.userId}`;
 }
 
+// Admin view: only ONE navigation message exists at a time. When the admin
+// opens the panel, the orders list, an order detail or the archive, any
+// previous view message is deleted first, so pressing back never leaves a
+// second copy of the detail behind.
+async function showAdminView(ctx, text, keyboard) {
+    const cfg = loadConfig();
+    const cur = ctx.callbackQuery && ctx.callbackQuery.message ? ctx.callbackQuery.message.message_id : null;
+    if (cfg.adminViewMessageId && cur && cfg.adminViewMessageId !== cur) {
+        try { await ctx.telegram.deleteMessage(ADMIN_ID, cfg.adminViewMessageId); } catch (e) {}
+    }
+    if (cur) {
+        cfg.adminViewMessageId = cur;
+        saveJSON(CONFIG_FILE, cfg);
+    }
+    return safeEdit(ctx, text, keyboard);
+}
+function orderActionKeyboard(o) {
+    const rows = [];
+    if (o.status === 'pending') {
+        rows.push([Markup.button.callback('✅ تأكيد الدفع واستلام الطلب', `approve:${o.id}`)]);
+        rows.push([Markup.button.callback('❌ رفض الطلب', `reject:${o.id}`)]);
+    }
+    rows.push([Markup.button.callback('💬 مراسلة الزبون', `msg:${o.id}`)]);
+    rows.push([Markup.button.url('فتح محادثة الزبون', `tg://user?id=${o.userId}`)]);
+    return Markup.inlineKeyboard(rows);
+}
 function orderDetailKeyboard(o, from) {
     const rows = [];
     if (o.status === 'pending') {
@@ -219,7 +245,7 @@ bot.command('cancel', (ctx) => {
 });
 bot.action('cancel', async (ctx) => {
     await safeAnswer(ctx, 'تم الإلغاء');
-    if (isAdmin(ctx)) return safeEdit(ctx, adminText(), adminKeyboard());
+    if (isAdmin(ctx)) return showAdminView(ctx, adminText(), adminKeyboard());
     return safeEdit(ctx, homeText(), homeKeyboard());
 });
 function adminPromptKeyboard() {
@@ -365,7 +391,7 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
     if (ADMIN_ID) {
         try {
             await ctx.telegram.sendMessage(ADMIN_ID, orderNotifyText(order),
-                { ...orderDetailKeyboard(order, 'orders') });
+                { ...orderActionKeyboard(order) });
         } catch (e) { console.error('Admin notify failed:', e && e.message); }
     }
     // Edit the SAME payment message in place to ask for the transaction number.
@@ -393,11 +419,15 @@ bot.action(/^approve:(.+)$/, async (ctx) => {
     const order = data.orders.find((o) => o.id === orderId);
     await safeAnswer(ctx, 'تم التأكيد');
     if (!order) return safeEdit(ctx, 'الطلب مو موجود.');
-    if (order.status !== 'pending') return safeEdit(ctx, orderDetailText(order), orderDetailKeyboard(order, 'archive'));
+    if (order.status !== 'pending') {
+        const nav = (ctx.callbackQuery && ctx.callbackQuery.message && ctx.callbackQuery.message.reply_markup && JSON.stringify(ctx.callbackQuery.message.reply_markup).includes('admin:orders'));
+        return safeEdit(ctx, orderDetailText(order), nav ? orderDetailKeyboard(order, 'archive') : orderActionKeyboard(order));
+    }
     order.status = 'confirmed';
     saveJSON(ORDERS_FILE, data);
     try { await ctx.telegram.sendMessage(order.userId, `✅ تم تأكيد الدفع واستلام طلبك: ${order.serviceTitle}\n\nطلبك قيد التنفيذ، شكراً لثقتك.`); } catch (e) {}
-    return safeEdit(ctx, orderDetailText(order), orderDetailKeyboard(order, 'orders'));
+    const nav = (ctx.callbackQuery && ctx.callbackQuery.message && ctx.callbackQuery.message.reply_markup && JSON.stringify(ctx.callbackQuery.message.reply_markup).includes('admin:orders'));
+    return safeEdit(ctx, orderDetailText(order), nav ? orderDetailKeyboard(order, 'orders') : orderActionKeyboard(order));
 });
 bot.action(/^reject:(.+)$/, async (ctx) => {
     if (!isAdmin(ctx)) return;
@@ -406,11 +436,15 @@ bot.action(/^reject:(.+)$/, async (ctx) => {
     const order = data.orders.find((o) => o.id === orderId);
     await safeAnswer(ctx, 'تم الرفض');
     if (!order) return safeEdit(ctx, 'الطلب مو موجود.');
-    if (order.status !== 'pending') return safeEdit(ctx, orderDetailText(order), orderDetailKeyboard(order, 'archive'));
+    if (order.status !== 'pending') {
+        const nav = (ctx.callbackQuery && ctx.callbackQuery.message && ctx.callbackQuery.message.reply_markup && JSON.stringify(ctx.callbackQuery.message.reply_markup).includes('admin:orders'));
+        return safeEdit(ctx, orderDetailText(order), nav ? orderDetailKeyboard(order, 'archive') : orderActionKeyboard(order));
+    }
     order.status = 'rejected';
     saveJSON(ORDERS_FILE, data);
     try { await ctx.telegram.sendMessage(order.userId, `❌ تم رفض طلبك: ${order.serviceTitle}\n\nتواصل مع الأدمن للتفاصيل.`); } catch (e) {}
-    return safeEdit(ctx, orderDetailText(order), orderDetailKeyboard(order, 'orders'));
+    const nav = (ctx.callbackQuery && ctx.callbackQuery.message && ctx.callbackQuery.message.reply_markup && JSON.stringify(ctx.callbackQuery.message.reply_markup).includes('admin:orders'));
+    return safeEdit(ctx, orderDetailText(order), nav ? orderDetailKeyboard(order, 'orders') : orderActionKeyboard(order));
 });
 
 function adminKeyboard() {
@@ -435,12 +469,19 @@ function adminText() {
 bot.action('admin:home', async (ctx) => {
     if (!isAdmin(ctx)) return;
     await safeAnswer(ctx);
-    return safeEdit(ctx, adminText(), adminKeyboard());
+    return showAdminView(ctx, adminText(), adminKeyboard());
 });
 
-bot.command('admin', (ctx) => {
+bot.command('admin', async (ctx) => {
     if (!isAdmin(ctx)) return ctx.reply('هاد الأمر للأدمن بس.');
-    return ctx.reply(adminText(), { parse_mode: 'Markdown', ...adminKeyboard() });
+    const cfg = loadConfig();
+    if (cfg.adminViewMessageId) {
+        try { await ctx.telegram.deleteMessage(ADMIN_ID, cfg.adminViewMessageId); } catch (e) {}
+    }
+    const sent = await ctx.reply(adminText(), { parse_mode: 'Markdown', ...adminKeyboard() });
+    cfg.adminViewMessageId = sent.message_id;
+    saveJSON(CONFIG_FILE, cfg);
+    return sent;
 });
 
 bot.action('admin:add_section', async (ctx) => {
@@ -479,23 +520,23 @@ bot.action('admin:orders', async (ctx) => {
     if (!isAdmin(ctx)) return;
     const { orders } = loadOrders();
     await safeAnswer(ctx);
-    if (!orders.length) return safeEdit(ctx, 'لسه ما في طلبات.', adminKeyboard());
+    if (!orders.length) return showAdminView(ctx, 'لسه ما في طلبات.', adminKeyboard());
     const recent = orders.filter((o) => o.status === 'pending').slice(-10);
-    if (!recent.length) return safeEdit(ctx, 'ما في طلبات بانتظار التأكد، كل الطلبات المؤكدة والمرفوضة صارت بالأرشيف.', Markup.inlineKeyboard([[Markup.button.callback('📦 أرشيف الطلبات', 'admin:archive')], [Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]]));
+    if (!recent.length) return showAdminView(ctx, 'ما في طلبات بانتظار التأكد، كل الطلبات المؤكدة والمرفوضة صارت بالأرشيف.', Markup.inlineKeyboard([[Markup.button.callback('📦 أرشيف الطلبات', 'admin:archive')], [Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]]));
     const list = recent.map((o, i) => {
         return `${i + 1}. ${o.serviceTitle} - ${o.price || ''} - ⏳ بانتظار التأكد${o.txNumber ? ' - معاملة: ' + o.txNumber : ''}\n   ${customerLine(o).replace(/\n/g, ' | ')}`;
     }).join('\n\n');
     const rows = recent.map((o, i) => [Markup.button.callback(`${i + 1}. ${o.serviceTitle} - بانتظار التأكد`, `admin:order:${o.id}`)]);
     rows.push([Markup.button.callback('📦 أرشيف الطلبات', 'admin:archive')]);
     rows.push([Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]);
-    return safeEdit(ctx, '🧾 **الطلبات بانتظار التأكد:**\n\n' + list + '\n\nكبس على رقم الطلب مشان تفتح تفاصيلو وتديره.', Markup.inlineKeyboard(rows));
+    return showAdminView(ctx, '🧾 **الطلبات بانتظار التأكد:**\n\n' + list + '\n\nكبس على رقم الطلب مشان تفتح تفاصيلو وتديره.', Markup.inlineKeyboard(rows));
 });
 bot.action('admin:archive', async (ctx) => {
     if (!isAdmin(ctx)) return;
     const { orders } = loadOrders();
     await safeAnswer(ctx);
     const done = orders.filter((o) => o.status !== 'pending').slice(-20);
-    if (!done.length) return safeEdit(ctx, 'الأرشيف فاضي، لسه ما في طلبات مؤكدة أو مرفوضة.', Markup.inlineKeyboard([[Markup.button.callback('🔙 رجوع للطلبات', 'admin:orders')], [Markup.button.callback('🏠 لوحة التحكم', 'admin:home')]]));
+    if (!done.length) return showAdminView(ctx, 'الأرشيف فاضي، لسه ما في طلبات مؤكدة أو مرفوضة.', Markup.inlineKeyboard([[Markup.button.callback('🔙 رجوع للطلبات', 'admin:orders')], [Markup.button.callback('🏠 لوحة التحكم', 'admin:home')]]));
     const list = done.map((o, i) => {
         const status = o.status === 'confirmed' ? '✅ مؤكد' : '❌ مرفوض';
         return `${i + 1}. ${o.serviceTitle} - ${o.price || ''} - ${status}${o.txNumber ? ' - معاملة: ' + o.txNumber : ''}\n   ${customerLine(o).replace(/\n/g, ' | ')}`;
@@ -503,7 +544,7 @@ bot.action('admin:archive', async (ctx) => {
     const rows = done.map((o, i) => [Markup.button.callback(`${i + 1}. ${o.serviceTitle} - ${o.status === 'confirmed' ? 'مؤكد' : 'مرفوض'}`, `admin:archive:${o.id}`)]);
     rows.push([Markup.button.callback('🔙 رجوع للطلبات', 'admin:orders')]);
     rows.push([Markup.button.callback('🏠 لوحة التحكم', 'admin:home')]);
-    return safeEdit(ctx, '📦 **أرشيف الطلبات:**\n\n' + list + '\n\nكبس على رقم الطلب مشان تفتح تفاصيلو.', Markup.inlineKeyboard(rows));
+    return showAdminView(ctx, '📦 **أرشيف الطلبات:**\n\n' + list + '\n\nكبس على رقم الطلب مشان تفتح تفاصيلو.', Markup.inlineKeyboard(rows));
 });
 bot.action(/^admin:order:(.+)$/, async (ctx) => {
     if (!isAdmin(ctx)) return;
@@ -512,7 +553,7 @@ bot.action(/^admin:order:(.+)$/, async (ctx) => {
     const order = data.orders.find((o) => o.id === orderId);
     await safeAnswer(ctx);
     if (!order) return safeEdit(ctx, 'الطلب مو موجود.', adminKeyboard());
-    return safeEdit(ctx, orderDetailText(order), orderDetailKeyboard(order, 'orders'));
+    return showAdminView(ctx, orderDetailText(order), orderDetailKeyboard(order, 'orders'));
 });
 bot.action(/^admin:archive:(.+)$/, async (ctx) => {
     if (!isAdmin(ctx)) return;
@@ -521,7 +562,7 @@ bot.action(/^admin:archive:(.+)$/, async (ctx) => {
     const order = data.orders.find((o) => o.id === orderId);
     await safeAnswer(ctx);
     if (!order) return safeEdit(ctx, 'الطلب مو موجود.', adminKeyboard());
-    return safeEdit(ctx, orderDetailText(order), orderDetailKeyboard(order, 'archive'));
+    return showAdminView(ctx, orderDetailText(order), orderDetailKeyboard(order, 'archive'));
 });
 bot.action('admin:set_payment', async (ctx) => {
     if (!isAdmin(ctx)) return;
