@@ -1,200 +1,121 @@
 const { Telegraf, Markup } = require('telegraf');
+const fs = require('fs');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const ADMIN_ID = process.env.ADMIN_ID ? String(process.env.ADMIN_ID).trim() : null;
 
-const activeUsers = new Set();
-let sessionActions = 0;
+const DB_FILE = './codes.json';
 
-// تسجيل وإرسال إشعار فوري بحسابك عند دخول أي شخص
-async function logToAdmin(ctx, activity) {
-    if (!ADMIN_ID) return;
-    try {
-        const u = ctx.from;
-        if (!u || String(u.id) === ADMIN_ID) return;
-
-        activeUsers.add(u.id);
-        sessionActions++;
-
-        const userTag = u.username ? `@${u.username}` : 'بدون معرف';
-        const name = [u.first_name, u.last_name].filter(Boolean).join(' ');
-        const time = new Date().toLocaleTimeString('ar-SY', { hour: '2-digit', minute: '2-digit' });
-
-        const report = 
-            `📊 **نشاط جديد في بوت الألعاب:**\n` +
-            `━━━━━━━━━━━━━━━\n` +
-            `👤 **اللاعب:** ${name} (${userTag})\n` +
-            `🆔 **الآيدي:** \`${u.id}\`\n` +
-            `🎮 **النشاط:** ${activity}\n` +
-            `⏰ **الوقت:** ${time}`;
-
-        await ctx.telegram.sendMessage(ADMIN_ID, report, { parse_mode: 'Markdown' });
-    } catch (err) {
-        console.error('Log error:', err.message);
+function loadDB() {
+    if (!fs.existsSync(DB_FILE)) {
+        fs.writeFileSync(DB_FILE, JSON.stringify({ codes: [] }, null, 2));
     }
+    return JSON.parse(fs.readFileSync(DB_FILE));
 }
 
-// قائمة الألعاب الرسمية والشغالة 100%
-const verifiedGames = {
-    ludo: {
-        title: '🎲 لودو الرسمية (2 - 4 لاعبين)',
-        desc: 'طاولة لودو كلاسيكية وسريعة من سيرفرات غوغل',
-        url: 'https://gamesnacks.com/games/ludolegend'
-    },
-    uno: {
-        title: '🃏 أونو التحدي (Uno - 2 إلى 4 لاعبين)',
-        desc: 'لعبة كروت الأونو الأصلية السريعة والخفيفة',
-        url: 'https://gamesnacks.com/games/duocards'
-    },
-    gartic: {
-        title: '🎨 خمن الرسمة (Gartic - قروبات)',
-        desc: 'لعبة تخمين ورسم بالعربي للقروبات بروم خاص',
-        url: 'https://gartic.io/'
-    },
-    connect4: {
-        title: '🔴 تحدي 4 على التوالي (Connect 4)',
-        desc: 'تحدي ذكاء مباشر وسريع لشخصين 1v1',
-        url: 'https://papergames.io/en/connect-4'
-    },
-    battleship: {
-        title: '🚢 حرب السفن البحرية',
-        desc: 'دمر أسطول صديقك - تحدي ثنائي حماسي',
-        url: 'https://papergames.io/en/battleship'
-    },
-    billiards: {
-        title: '🎱 بلياردو التحدي (8 Ball)',
-        desc: 'طاولة بلياردو احترافية وسريعة',
-        url: 'https://gamesnacks.com/games/8ballbilliardsclassic'
-    }
-};
+function saveDB(data) {
+    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
+}
 
-// القائمة الرئيسية للبوت
-function getHomeKeyboard() {
+function homeKeyboard() {
     return Markup.inlineKeyboard([
-        [
-            Markup.button.switchToChat('📢 إرسال طاولة لقروب أو صديق', 'game')
-        ],
-        [
-            Markup.button.url('🎲 لودو (2 - 4 لاعبين)', verifiedGames.ludo.url),
-            Markup.button.url('🃏 أونو (2 - 4 لاعبين)', verifiedGames.uno.url)
-        ],
-        [
-            Markup.button.url('🎨 خمن الرسمة (قروبات)', verifiedGames.gartic.url),
-            Markup.button.url('🔴 تحدي Connect 4', verifiedGames.connect4.url)
-        ],
-        [
-            Markup.button.url('🚢 حرب السفن', verifiedGames.battleship.url),
-            Markup.button.url('🎱 بلياردو', verifiedGames.billiards.url)
-        ],
-        [
-            Markup.button.callback('ℹ️ كيف تلعب مع أصدقائك؟', 'help_info')
-        ]
+        [Markup.button.callback('🛍️ تصفح الأكواد', 'browse_codes')],
+        [Markup.button.callback('➕ أضف كودي', 'add_my_code')],
+        [Markup.button.callback('❓ كيف تشتغل؟', 'how_it_works')]
     ]);
 }
 
-bot.start(async (ctx) => {
-    await logToAdmin(ctx, 'فتح البوت (/start)');
+bot.start((ctx) => {
     return ctx.reply(
-        '🎮 **مرحباً بك في منصة الألعاب التفاعلية المباشرة!**\n\n' +
-        '• تم تجهيز طاولات **اللودو والأونو** الرسمية للعب الفردي والجماعي.\n' +
-        '• تفتح الألعاب فوراً بلمسة زر داخل تيليجرام دون أي تحميل أو إعلانات.\n\n' +
-        'اختر اللعبة وابدأ اللعب فوراً 👇',
-        { parse_mode: 'Markdown', ...getHomeKeyboard() }
+        '🛍️ **أهلاً فيك بمتجر تبادل أكواد موس!**\n\n' +
+        'هون بتلاقي أكواد دعوة من ناس حقيقية من دول مختلفة، وبتضيف كودك لحتى غيرك يستفيد منو.\n\n' +
+        '⚠️ مهم: الكود بيشتغل بس لحساب جديد، وخلال أول 48 ساعة من إنشاء الحساب، ومرة وحدة بس لكل حساب. ما في بيع تفعيل، التبادل مجاني.',
+        { parse_mode: 'Markdown', ...homeKeyboard() }
     );
 });
 
-// أوامر القروبات السريعة
-bot.command(['ludo', 'uno', 'play', 'games'], async (ctx) => {
-    await logToAdmin(ctx, 'طلب طاولة بالقروب');
-    return ctx.reply(
-        `🎲 **طاولة ألعاب جماعية جاهزة للقروب!**\n` +
-        `👑 فتح الطاولة: ${ctx.from.first_name}\n\n` +
-        `اضغطوا على اللعبة التي تناسبكم للبدء فوراً:`,
-        Markup.inlineKeyboard([
-            [
-                Markup.button.url('🎲 دخول لودو (2-4)', verifiedGames.ludo.url),
-                Markup.button.url('🃏 دخول أونو (2-4)', verifiedGames.uno.url)
-            ],
-            [
-                Markup.button.url('🎨 خمن الرسمة', verifiedGames.gartic.url),
-                Markup.button.url('🔴 تحدي Connect 4', verifiedGames.connect4.url)
-            ]
-        ])
-    );
+bot.action('browse_codes', async (ctx) => {
+    const db = loadDB();
+    if (!db.codes.length) {
+        await ctx.answerCbQuery();
+        return ctx.reply('لسه ما في أكواد مضافة، كون أول واحد وضيف كودك من زر أضف كودي.');
+    }
+    const list = db.codes.slice(0, 20).map((c, i) =>
+        `${i + 1}. \`${c.code}\` - ${c.country || 'بدون بلد'} - أضافو @${c.username || 'بدون معرف'}`
+    ).join('\n');
+    await ctx.answerCbQuery();
+    return ctx.reply(`🛍️ **الأكواد المتوفرة:**\n\n${list}\n\nانسخ الكود وروح على Muse > Settings > Redeem invite code واكتبو خلال أول 48 ساعة من إنشاء حسابك.`, { parse_mode: 'Markdown' });
 });
 
-// لوحة تحكم المدير
-bot.command(['stats', 'admin'], async (ctx) => {
-    if (String(ctx.from.id) !== ADMIN_ID) return;
+bot.action('add_my_code', async (ctx) => {
+    await ctx.answerCbQuery();
+    return ctx.reply('أرسل كودك بهالشكل:\n`/addcode ABC123 بلدك`\n\nمثال: `/addcode ABC123 سوريا`', { parse_mode: 'Markdown' });
+});
 
+bot.action('how_it_works', async (ctx) => {
+    await ctx.answerCbQuery();
     return ctx.reply(
-        `👑 **لوحة تحكم المدير:**\n` +
-        `━━━━━━━━━━━━━━━\n` +
-        `👥 مستخدمو الجلسة: ${activeUsers.size}\n` +
-        `🎯 إجمالي التفاعلات: ${sessionActions}\n` +
-        `⚡ سيرفر Vercel يعمل 24/7 باستقرار تام.`,
+        '❓ **كيف تشتغل؟**\n\n' +
+        '1. إذا عندك حساب جديد على موس، اختار كود من قائمة الأكواد.\n' +
+        '2. افتح Muse > Settings > Redeem invite code، واكتب الكود خلال أول 48 ساعة.\n' +
+        '3. انت وصاحب الكود بتاخدو 1 مليار توكن.\n' +
+        '4. إذا عندك كود، ضيفو بالبوت لحتى غيرك يستعملو.\n\n' +
+        'الكود مرة وحدة بس لكل حساب جديد، والتبادل مجاني، وما في دفع ولا تفعيل مدفوع.',
         { parse_mode: 'Markdown' }
     );
 });
 
-// التعليمات
-bot.action('help_info', async (ctx) => {
-    await ctx.answerCbQuery();
-    await ctx.reply(
-        '💡 **كيف تلعب مع أصدقائك؟**\n\n' +
-        '1. اضغط على زر **«📢 إرسال طاولة لقروب أو صديق»**.\n' +
-        '2. اختر القروب أو شات رفيقك لتصل بطاقة اللعبة فوراً.\n' +
-        '3. يضغط الطرف الثاني على الزر وتبدأ الجولة مباشرة من شاشة تيليجرام.',
-        {
-            parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard([[Markup.button.callback('🔙 رجوع', 'home_menu')]])
-        }
-    );
+bot.command('store', (ctx) => {
+    return ctx.reply('🛍️ **متجر تبادل أكواد موس**\n\nتصفح الأكواد أو أضف كودك من الأزرار:', { parse_mode: 'Markdown', ...homeKeyboard() });
 });
 
-bot.action('home_menu', async (ctx) => {
-    await ctx.answerCbQuery();
-    await ctx.editMessageText(
-        '🎮 **منصة الألعاب التفاعلية:**\nاختر لعبتك المفضلة:',
-        { parse_mode: 'Markdown', ...getHomeKeyboard() }
-    );
+bot.command('codes', (ctx) => {
+    const db = loadDB();
+    if (!db.codes.length) return ctx.reply('لسه ما في أكواد مضافة.');
+    const list = db.codes.slice(0, 20).map((c, i) => `${i + 1}. \`${c.code}\` - ${c.country || ''}`).join('\n');
+    return ctx.reply(`🛍️ **الأكواد:**\n\n${list}`, { parse_mode: 'Markdown' });
 });
 
-// نظام مشاركة الألعاب داخل أي محادثة (Inline Mode)
-bot.on('inline_query', async (ctx) => {
-    await logToAdmin(ctx, 'مشاركة طاولة في محادثة (Inline)');
-
-    const gamesList = Object.values(verifiedGames);
-    const results = gamesList.map((game, index) => ({
-        type: 'article',
-        id: `game_${index}`,
-        title: game.title,
-        description: game.desc,
-        thumb_url: 'https://cdn-icons-png.flaticon.com/512/808/808439.png',
-        input_message_content: {
-            message_text:
-                `⚔️ **دعوة لعب وتحدي مفتوحة!**\n\n` +
-                `🎮 اللعبة: **${game.title}**\n` +
-                `👑 المنشئ: ${ctx.from.first_name}\n\n` +
-                `اضغطوا على الزر بالأسفل للدخول واللعب معاً فوراً 👇`,
-            parse_mode: 'Markdown'
-        },
-        reply_markup: Markup.inlineKeyboard([
-            [Markup.button.url('🕹️ دخول اللعبة وبدء التحدي', game.url)]
-        ])
-    }));
-
-    return ctx.answerInlineQuery(results, { cache_time: 10 });
+bot.command('addcode', (ctx) => {
+    const args = ctx.message.text.split(' ').slice(1);
+    const code = (args[0] || '').trim().toUpperCase();
+    const country = args.slice(1).join(' ').trim();
+    if (!code || code.length < 4) {
+        return ctx.reply('طريقة الاستعمال: /addcode ABC123 بلدك');
+    }
+    const db = loadDB();
+    if (db.codes.find((c) => c.code === code)) {
+        return ctx.reply('هاد الكود موجود مسبقاً.');
+    }
+    db.codes.push({
+        code,
+        country,
+        username: ctx.from.username || '',
+        userId: String(ctx.from.id),
+        addedAt: new Date().toISOString()
+    });
+    saveDB(db);
+    return ctx.reply(`تمت إضافة كودك \`${code}\` بنجاح، شكراً لمشاركتك.`, { parse_mode: 'Markdown' });
 });
 
-// معالج Vercel
+bot.command('delcode', (ctx) => {
+    if (ADMIN_ID && String(ctx.from.id) !== ADMIN_ID) return;
+    const args = ctx.message.text.split(' ').slice(1);
+    const code = (args[0] || '').trim().toUpperCase();
+    if (!code) return ctx.reply('طريقة الاستعمال: /delcode ABC123');
+    const db = loadDB();
+    db.codes = db.codes.filter((c) => c.code !== code);
+    saveDB(db);
+    return ctx.reply(`تم حذف الكود \`${code}\`.`, { parse_mode: 'Markdown' });
+});
+
 module.exports = async (req, res) => {
     try {
         if (req.method === 'POST') {
             await bot.handleUpdate(req.body);
             return res.status(200).send('OK');
         }
-        return res.status(200).send('Ludo & Uno Arcade Platform is Live 24/7.');
+        return res.status(200).send('Muse Code Exchange Store is Live.');
     } catch (err) {
         return res.status(200).send('OK');
     }
