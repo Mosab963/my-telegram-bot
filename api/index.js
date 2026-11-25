@@ -28,7 +28,37 @@ const DEFAULT_SECTIONS = [];
 const DEFAULT_CONFIG = { paymentInfo: '💳 طرق الدفع:\n\n💵 شام كاش:\n`40ba4e3f2a3dc2a1759dbd26d21037c6`\n\n🟡 بينانس:\n`481984372`\n\nاضغط على الكود لنسخه، وبعد ما تدفع، كبس زر تأكيد الدفع تحت.' };
 
 function loadCodes() { return loadJSON(CODES_FILE, { codes: [] }); }
-function loadSections() { return loadJSON(SECTIONS_FILE, { sections: DEFAULT_SECTIONS }); }
+function loadSections() {
+    const data = loadJSON(SECTIONS_FILE, { sections: DEFAULT_SECTIONS });
+    const seen = new Set();
+    const clean = [];
+    for (const s of (data.sections || [])) {
+        const key = String(s.title || '').trim().toLowerCase();
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        clean.push(s);
+    }
+    if (clean.length !== (data.sections || []).length) {
+        data.sections = clean;
+        try { saveJSON(SECTIONS_FILE, data); } catch (e) {}
+    }
+    return data;
+}
+function addOrUpdateService(title, price, text) {
+    const data = loadSections();
+    const key = String(title || '').trim().toLowerCase();
+    const existing = data.sections.find((s) => String(s.title || '').trim().toLowerCase() === key);
+    if (existing) {
+        existing.price = price || existing.price;
+        existing.text = text || existing.text;
+        saveJSON(SECTIONS_FILE, data);
+        return { updated: true, service: existing };
+    }
+    const service = { id: 'sec_' + Date.now(), title, price, text };
+    data.sections.push(service);
+    saveJSON(SECTIONS_FILE, data);
+    return { updated: false, service };
+}
 function loadOrders() { return loadJSON(ORDERS_FILE, { orders: [] }); }
 function loadConfig() { return loadJSON(CONFIG_FILE, DEFAULT_CONFIG); }
 
@@ -89,11 +119,8 @@ bot.command('addservice', (ctx) => {
     if (parts.length < 3 || !parts[0] || !parts[1]) {
         return ctx.reply('الصيغة الصحيحة:\n`/addservice عرض 1 | 1$ | 5 صفحات إكسل`', { parse_mode: 'Markdown' });
     }
-    const data = loadSections();
-    const id = 'sec_' + Date.now();
-    data.sections.push({ id, title: parts[0], price: parts[1], text: parts.slice(2).join(' | ') });
-    saveJSON(SECTIONS_FILE, data);
-    backupToAdmin(ctx);
+    const res = addOrUpdateService(parts[0], parts[1], parts.slice(2).join(' | '));
+    if (res.updated) return ctx.reply(`الخدمة "${parts[0]}" موجودة مسبقاً، حدثتها بدل ما تتكرر.`, { parse_mode: 'Markdown', ...adminKeyboard() });
     return ctx.reply(`تمت إضافة الخدمة "${parts[0]}" بسعر ${parts[1]} بنجاح.`, { parse_mode: 'Markdown', ...adminKeyboard() });
 });
 bot.command('delservice', (ctx) => {
@@ -103,7 +130,6 @@ bot.command('delservice', (ctx) => {
     if (isNaN(n) || !data.sections[n]) return ctx.reply('الصيغة: /delservice 1');
     const removed = data.sections.splice(n, 1)[0];
     saveJSON(SECTIONS_FILE, data);
-    backupToAdmin(ctx);
     return ctx.reply(`تم حذف الخدمة "${removed.title}".`, { parse_mode: 'Markdown', ...adminKeyboard() });
 });
 bot.command('setprice', (ctx) => {
@@ -115,7 +141,6 @@ bot.command('setprice', (ctx) => {
     if (isNaN(n) || !data.sections[n] || !parts[1]) return ctx.reply('الصيغة: /setprice 1 | 2$');
     data.sections[n].price = parts[1];
     saveJSON(SECTIONS_FILE, data);
-    backupToAdmin(ctx);
     return ctx.reply('تم تعديل السعر.', { parse_mode: 'Markdown', ...adminKeyboard() });
 });
 bot.command('edittext', (ctx) => {
@@ -127,7 +152,6 @@ bot.command('edittext', (ctx) => {
     if (isNaN(n) || !data.sections[n] || !parts[1]) return ctx.reply('الصيغة: /edittext 1 | النص الجديد');
     data.sections[n].text = parts.slice(1).join(' | ');
     saveJSON(SECTIONS_FILE, data);
-    backupToAdmin(ctx);
     return ctx.reply('تم تعديل النص.', { parse_mode: 'Markdown', ...adminKeyboard() });
 });
 bot.command('setpayment', (ctx) => {
@@ -137,7 +161,6 @@ bot.command('setpayment', (ctx) => {
     const cfg = loadConfig();
     cfg.paymentInfo = args;
     saveJSON(CONFIG_FILE, cfg);
-    backupToAdmin(ctx);
     return ctx.reply('تم تعديل معلومات الدفع.', { parse_mode: 'Markdown', ...adminKeyboard() });
 });
 
@@ -249,7 +272,7 @@ function adminKeyboard() {
     ]);
 }
 function adminText() {
-    return '👑 **لوحة تحكم الأدمن**\n\nمن هون بتضيف خدمة، وبتعدل نصها وسعرها، وبتحذفها، وبتعدل معلومات الدفع، وبتشوف الطلبات وبتأكد الدفع. كل تعديل بيبعتلك نسخة احتياطية تلقائياً على الخاص، لحتى ما يضيع شي.';
+    return '👑 **لوحة تحكم الأدمن**\n\nمن هون بتضيف خدمة، وبتعدل نصها وسعرها، وبتحذفها، وبتعدل معلومات الدفع، وبتشوف الطلبات وبتأكد الدفع. النسخة الاحتياطية بتاخدها من زر نسخة احتياطية وقت ما بدك.';
 }
 
 bot.command('admin', (ctx) => {
@@ -382,10 +405,9 @@ bot.on('text', async (ctx, next) => {
         const name = parseField(replied, 'اسم الخدمة');
         const desc = parseField(replied, 'الوصف');
         if (!name) return ctx.reply('ما لقيت اسم الخدمة، ابدأ من جديد بزر إضافة خدمة.');
-        const data = loadSections();
-        data.sections.push({ id: 'sec_' + Date.now(), title: name, price: text, text: desc });
-        saveJSON(SECTIONS_FILE, data);
-        await backupToAdmin(ctx);
+        addOrUpdateService(name, text, desc);
+        // backup only on demand now, to keep the bot fast
+
         return ctx.reply(`تمت إضافة الخدمة "${name}" بسعر ${text} بنجاح.`, { parse_mode: 'Markdown', ...adminKeyboard() });
     }
     // Step 2: replying to the description prompt -> ask price, or finish if price included
@@ -394,19 +416,17 @@ bot.on('text', async (ctx, next) => {
         if (!name) return ctx.reply('ما لقيت اسم الخدمة، ابدأ من جديد بزر إضافة خدمة.');
         const parts = text.split('|').map((s) => s.trim());
         if (parts.length >= 2) {
-            const data = loadSections();
-            data.sections.push({ id: 'sec_' + Date.now(), title: name, price: parts[1], text: parts[0] });
-            saveJSON(SECTIONS_FILE, data);
-            await backupToAdmin(ctx);
+            addOrUpdateService(name, parts[1], parts[0]);
+            // backup only on demand now, to keep the bot fast
+
             return ctx.reply(`تمت إضافة الخدمة "${name}" بسعر ${parts[1]} بنجاح.`, { parse_mode: 'Markdown', ...adminKeyboard() });
         }
         const price = priceFrom(text);
         if (price) {
             const desc = text.replace(price, '').trim();
-            const data = loadSections();
-            data.sections.push({ id: 'sec_' + Date.now(), title: name, price, text: desc });
-            saveJSON(SECTIONS_FILE, data);
-            await backupToAdmin(ctx);
+            addOrUpdateService(name, price, desc);
+            // backup only on demand now, to keep the bot fast
+
             return ctx.reply(`تمت إضافة الخدمة "${name}" بسعر ${price} بنجاح.`, { parse_mode: 'Markdown', ...adminKeyboard() });
         }
         return ctx.reply(`اسم الخدمة: ${name}\nالوصف: ${text}\n\nأرسل سعر الخدمة:`, { parse_mode: 'Markdown', ...Markup.forceReply() });
@@ -435,9 +455,19 @@ bot.on('document', async (ctx) => {
     } catch (e) { return ctx.reply('ما قدرت اقرأ الملف، تأكد إنو ملف نسخة احتياطية صحيح.'); }
 });
 
+const seenUpdates = new Set();
 module.exports = async (req, res) => {
     try {
-        if (req.method === 'POST') { await bot.handleUpdate(req.body); return res.status(200).send('OK'); }
+        if (req.method === 'POST') {
+            const updateId = req.body && req.body.update_id;
+            if (updateId != null) {
+                if (seenUpdates.has(updateId)) return res.status(200).send('OK');
+                seenUpdates.add(updateId);
+                if (seenUpdates.size > 1000) seenUpdates.clear();
+            }
+            await bot.handleUpdate(req.body);
+            return res.status(200).send('OK');
+        }
         return res.status(200).send('Muse Code Exchange Store is Live.');
     } catch (err) { return res.status(200).send('OK'); }
 };
