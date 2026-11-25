@@ -738,6 +738,13 @@ bot.on('text', async (ctx, next) => {
                 }
                 return ctx.reply(`⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${pendingOrder.serviceTitle}\nرقم الطلب: \`${pendingOrder.id}\`\nرقم المعاملة: \`${text}\`\n\nرح نبلغك بس نتأكد من الدفع.`, { parse_mode: 'Markdown', ...homeKeyboard() });
             }
+            // Only customers with an order can message the admin. Anyone else
+            // gets a polite reply pointing them to order first, and nothing
+            // is forwarded, so random messages never reach the admin.
+            const hasOrder = ordersData.orders.some((o) => o.userId === String(ctx.from.id));
+            if (!hasOrder) {
+                return ctx.reply('للتواصل مع الأدمن لازم يكون عندك طلب أولاً.\n\nتصفح الخدمات واطلب اللي بيناسبك، وبعدها بتقدر تراسلنا بخصوص طلبك.', { parse_mode: 'Markdown', ...homeKeyboard() });
+            }
             if (ADMIN_ID && text.length >= 3) {
                 try { await ctx.telegram.sendMessage(ADMIN_ID, `💬 رسالة من زبون\n\n${customerLine({ name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' '), username: ctx.from.username || '', userId: String(ctx.from.id) })}\n\nالرسالة: ${escapeHtml(text)}`, { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.url('فتح محادثة الزبون', `tg://user?id=${ctx.from.id}`)]]) }); } catch (e) {}
             }
