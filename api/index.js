@@ -26,7 +26,7 @@ function saveJSON(file, data) {
 }
 
 const DEFAULT_SECTIONS = [];
-const DEFAULT_CONFIG = { paymentInfo: 'للدفع تواصل مع الأدمن لتأكيد طريقة الدفع.' };
+const DEFAULT_CONFIG = { paymentInfo: '💳 طرق الدفع:\n\n💵 شام كاش: 40ba4e3f2a3dc2a1759dbd26d21037c6\n\n🟡 بينانس: 481984372\n\nبعد ما تدفع، كبس زر تأكيد الدفع تحت.' };
 
 function loadCodes() { return loadJSON(CODES_FILE, { codes: [] }); }
 function loadSections() { return loadJSON(SECTIONS_FILE, { sections: DEFAULT_SECTIONS }); }
