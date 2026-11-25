@@ -107,8 +107,23 @@ bot.catch((err) => console.error('Bot error:', err));
 bot.start((ctx) => ctx.reply(homeText(), { parse_mode: 'Markdown', ...homeKeyboard() }));
 bot.command('store', (ctx) => ctx.reply(homeText(), { parse_mode: 'Markdown', ...homeKeyboard() }));
 bot.command('cancel', (ctx) => {
+    if (isAdmin(ctx)) return ctx.reply('تم الإلغاء، رجعت للوحة التحكم.', { parse_mode: 'Markdown', ...adminKeyboard() });
     return ctx.reply('تم الإلغاء، رجعت للقائمة الرئيسية.', { parse_mode: 'Markdown', ...homeKeyboard() });
 });
+bot.action('cancel', async (ctx) => {
+    await safeAnswer(ctx, 'تم الإلغاء');
+    if (isAdmin(ctx)) return safeEdit(ctx, adminText(), adminKeyboard());
+    return safeEdit(ctx, homeText(), homeKeyboard());
+});
+function adminPromptKeyboard() {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('❌ إلغاء', 'cancel')],
+        [Markup.button.callback('🏠 الرئيسية', 'home')]
+    ]);
+}
+function cancelKeyboard() {
+    return Markup.inlineKeyboard([[Markup.button.callback('❌ إلغاء', 'cancel')]]);
+}
 
 // Single-message admin commands - no multi-step state, so Vercel cold starts cannot lose the step.
 // Format: /addservice الاسم | السعر | الوصف
@@ -199,6 +214,7 @@ bot.action(/^section:(.+)$/, async (ctx) => {
     const priceLine = sec.price ? `\n💰 السعر: ${sec.price}` : '';
     return safeEdit(ctx, `**${sec.title}**\n\n${sec.text || ''}${priceLine}`, Markup.inlineKeyboard([
         [Markup.button.callback('✅ تأكيد الطلب', `order:${sec.id}`)],
+        [Markup.button.callback('❌ إلغاء', 'cancel')],
         [Markup.button.callback('🔙 رجوع', 'home')]
     ]));
 });
@@ -227,7 +243,7 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
     if (!sec) return safeEdit(ctx, 'هاد القسم مو موجود.', homeKeyboard());
     // Ask for the transaction number first, then the order is created and steps end.
     return ctx.reply(
-        `💳 **تأكيد الدفع**\n\nالخدمة: ${sec.title}\nالسعر: ${sec.price || ''}\nمعرف الخدمة: ${sec.id}\n\nأرسل رقم المعاملة:`,
+        `💳 **تأكيد الدفع**\n\nالخدمة: ${sec.title}\nالسعر: ${sec.price || ''}\nمعرف الخدمة: ${sec.id}\n\nأرسل رقم المعاملة:\n\nاكتب /cancel للإلغاء.`,
         { parse_mode: 'Markdown', ...Markup.forceReply() }
     );
 });
@@ -285,25 +301,25 @@ bot.action('admin:add_section', async (ctx) => {
     await safeAnswer(ctx);
     // Multi-step, stateless: ask for the name with force_reply, so the admin's
     // reply carries the step with it. No pending state is stored on the server.
-    return ctx.reply('➕ **إضافة خدمة**\n\nأرسل اسم الخدمة:', { parse_mode: 'Markdown', ...Markup.forceReply() });
+    return ctx.reply('➕ **إضافة خدمة**\n\nأرسل اسم الخدمة:\n\nاكتب /cancel للإلغاء.', { parse_mode: 'Markdown', ...Markup.forceReply() });
 });
 bot.action('admin:edit_section', async (ctx) => {
     if (!isAdmin(ctx)) return;
     const { sections } = loadSections();
     await safeAnswer(ctx);
-    return safeEdit(ctx, '✏️ **تعديل نص خدمة**\n\nأرسل أمر واحد بهالشكل:\n`/edittext 1 | النص الجديد`\n\nالخدمات:\n' + (sections.map((s, i) => `${i + 1}. ${s.title}`).join('\n') || 'لا يوجد خدمات'), adminKeyboard());
+    return safeEdit(ctx, '✏️ **تعديل نص خدمة**\n\nأرسل أمر واحد بهالشكل:\n`/edittext 1 | النص الجديد`\n\nالخدمات:\n' + (sections.map((s, i) => `${i + 1}. ${s.title}`).join('\n') || 'لا يوجد خدمات'), adminPromptKeyboard());
 });
 bot.action('admin:edit_price', async (ctx) => {
     if (!isAdmin(ctx)) return;
     const { sections } = loadSections();
     await safeAnswer(ctx);
-    return safeEdit(ctx, '💰 **تعديل سعر خدمة**\n\nأرسل أمر واحد بهالشكل:\n`/setprice 1 | 2$`\n\nالخدمات:\n' + (sections.map((s, i) => `${i + 1}. ${s.title} - ${s.price || 'بدون سعر'}`).join('\n') || 'لا يوجد خدمات'), adminKeyboard());
+    return safeEdit(ctx, '💰 **تعديل سعر خدمة**\n\nأرسل أمر واحد بهالشكل:\n`/setprice 1 | 2$`\n\nالخدمات:\n' + (sections.map((s, i) => `${i + 1}. ${s.title} - ${s.price || 'بدون سعر'}`).join('\n') || 'لا يوجد خدمات'), adminPromptKeyboard());
 });
 bot.action('admin:del_section', async (ctx) => {
     if (!isAdmin(ctx)) return;
     const { sections } = loadSections();
     await safeAnswer(ctx);
-    return safeEdit(ctx, '🗑️ **حذف خدمة**\n\nأرسل أمر واحد بهالشكل:\n`/delservice 1`\n\nالخدمات:\n' + (sections.map((s, i) => `${i + 1}. ${s.title}`).join('\n') || 'لا يوجد خدمات'), adminKeyboard());
+    return safeEdit(ctx, '🗑️ **حذف خدمة**\n\nأرسل أمر واحد بهالشكل:\n`/delservice 1`\n\nالخدمات:\n' + (sections.map((s, i) => `${i + 1}. ${s.title}`).join('\n') || 'لا يوجد خدمات'), adminPromptKeyboard());
 });
 bot.action('admin:list_sections', async (ctx) => {
     if (!isAdmin(ctx)) return;
@@ -323,7 +339,7 @@ bot.action('admin:orders', async (ctx) => {
 bot.action('admin:set_payment', async (ctx) => {
     if (!isAdmin(ctx)) return;
     await safeAnswer(ctx);
-    return safeEdit(ctx, '💳 **تعديل معلومات الدفع**\n\nأرسل أمر واحد بهالشكل:\n`/setpayment معلومات الدفع الجديدة`\n\nالمعلومات الحالية:\n' + loadConfig().paymentInfo, adminKeyboard());
+    return safeEdit(ctx, '💳 **تعديل معلومات الدفع**\n\nأرسل أمر واحد بهالشكل:\n`/setpayment معلومات الدفع الجديدة`\n\nالمعلومات الحالية:\n' + loadConfig().paymentInfo, adminPromptKeyboard());
 });
 bot.action('admin:stats', async (ctx) => {
     if (!isAdmin(ctx)) return;
@@ -429,10 +445,10 @@ bot.on('text', async (ctx, next) => {
 
             return ctx.reply(`تمت إضافة الخدمة "${name}" بسعر ${price} بنجاح.`, { parse_mode: 'Markdown', ...adminKeyboard() });
         }
-        return ctx.reply(`اسم الخدمة: ${name}\nالوصف: ${text}\n\nأرسل سعر الخدمة:`, { parse_mode: 'Markdown', ...Markup.forceReply() });
+        return ctx.reply(`اسم الخدمة: ${name}\nالوصف: ${text}\n\nأرسل سعر الخدمة:\n\nاكتب /cancel للإلغاء.`, { parse_mode: 'Markdown', ...Markup.forceReply() });
     }
     // Step 1: replying to the name prompt, or a plain text from the admin -> treat as the name
-    return ctx.reply(`اسم الخدمة: ${text}\n\nأرسل وصف الخدمة:`, { parse_mode: 'Markdown', ...Markup.forceReply() });
+    return ctx.reply(`اسم الخدمة: ${text}\n\nأرسل وصف الخدمة:\n\nاكتب /cancel للإلغاء.`, { parse_mode: 'Markdown', ...Markup.forceReply() });
 });
 
 bot.on('document', async (ctx) => {
