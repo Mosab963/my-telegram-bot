@@ -8,6 +8,7 @@ const CODES_FILE = './codes.json';
 const SECTIONS_FILE = './services.json';
 const ORDERS_FILE = './orders.json';
 const CONFIG_FILE = './config.json';
+const PENDING_FILE = './pending.json';
 
 function loadJSON(file, fallback) {
     try {
@@ -21,16 +22,18 @@ function loadJSON(file, fallback) {
     }
 }
 function saveJSON(file, data) {
-    fs.writeFileSync(file, JSON.stringify(data, null, 2));
+    try { fs.writeFileSync(file, JSON.stringify(data, null, 2)); } catch (e) {}
 }
 
 const DEFAULT_SECTIONS = [];
-const DEFAULT_CONFIG = { paymentInfo: 'للدفع تواصل مع الأدمن لتأكيد طريقة الدفع.' };
+const DEFAULT_CONFIG = { paymentInfo: '💳 طرق الدفع:\n\n💵 شام كاش: 40ba4e3f2a3dc2a1759dbd26d21037c6\n\n🟡 بينانس: 481984372\n\nبعد ما تدفع، كبس زر تأكيد الدفع تحت.' };
 
 function loadCodes() { return loadJSON(CODES_FILE, { codes: [] }); }
 function loadSections() { return loadJSON(SECTIONS_FILE, { sections: DEFAULT_SECTIONS }); }
 function loadOrders() { return loadJSON(ORDERS_FILE, { orders: [] }); }
 function loadConfig() { return loadJSON(CONFIG_FILE, DEFAULT_CONFIG); }
+function loadPending() { return loadJSON(PENDING_FILE, {}); }
+function savePending(p) { saveJSON(PENDING_FILE, p); }
 
 async function backupToAdmin(ctx) {
     if (!ADMIN_ID) return;
@@ -42,73 +45,102 @@ async function backupToAdmin(ctx) {
 }
 
 function isAdmin(ctx) { return ADMIN_ID && String(ctx.from.id) === ADMIN_ID; }
+
+async function safeEdit(ctx, text, extra) {
+    const opts = { parse_mode: 'Markdown', ...(extra || {}) };
+    try {
+        await ctx.editMessageText(text, opts);
+        return true;
+    } catch (e) {
+        const msg = String(e && e.message || '');
+        if (msg.includes('message is not modified')) return true;
+        try { await ctx.reply(text, opts); } catch (_) {}
+        return false;
+    }
+}
+async function safeAnswer(ctx, text) {
+    try { await ctx.answerCbQuery(text || ''); } catch (_) {}
+}
+
 function homeKeyboard() {
     const { sections } = loadSections();
     const rows = sections.map((s) => [Markup.button.callback(s.title, `section:${s.id}`)]);
+    rows.push([Markup.button.callback('📦 طلباتي', 'myorders')]);
+    if (ADMIN_ID) rows.push([Markup.button.url('💬 تواصل مع الدعم', `tg://user?id=${ADMIN_ID}`)]);
     return Markup.inlineKeyboard(rows);
 }
+function homeText() {
+    const { sections } = loadSections();
+    if (!sections.length) return '🛍️ **أهلاً فيك بمتجرنا!**\n\nلسه ما في خدمات معروضة حالياً، تابعنا قريباً.';
+    return '🛍️ **أهلاً فيك بمتجرنا!**\n\nتصفح الأقسام من الأزرار تحت، واختار اللي بيناسبك.';
+}
 
-bot.start((ctx) => {
-    return ctx.reply(
-        '🛍️ **أهلاً فيك بمتجرنا!**\n\nتصفح الأقسام من الأزرار تحت، واختار اللي بيناسبك.',
-        { parse_mode: 'Markdown', ...homeKeyboard() }
-    );
+bot.catch((err) => console.error('Bot error:', err));
+
+bot.start((ctx) => ctx.reply(homeText(), { parse_mode: 'Markdown', ...homeKeyboard() }));
+bot.command('store', (ctx) => ctx.reply(homeText(), { parse_mode: 'Markdown', ...homeKeyboard() }));
+bot.command('cancel', (ctx) => {
+    const p = loadPending(); delete p[String(ctx.from.id)]; savePending(p);
+    return ctx.reply('تم الإلغاء، رجعت للقائمة الرئيسية.', { parse_mode: 'Markdown', ...homeKeyboard() });
 });
 
-bot.command('store', (ctx) => ctx.reply('🛍️ **متجرنا**\n\nتصفح الأقسام من الأزرار تحت.', { parse_mode: 'Markdown', ...homeKeyboard() }));
+bot.command('myorders', (ctx) => {
+    const { orders } = loadOrders();
+    const mine = orders.filter((o) => o.userId === String(ctx.from.id));
+    if (!mine.length) return ctx.reply('لسه ما عندك طلبات.', { parse_mode: 'Markdown', ...homeKeyboard() });
+    const list = mine.slice(-10).map((o) => `• ${o.serviceTitle} - ${o.price || ''} - ${o.status === 'pending' ? 'قيد التنفيذ، بانتظار التأكد من الدفع' : o.status === 'confirmed' ? 'تم تأكيد الدفع' : 'مرفوض'}`).join('\n');
+    return ctx.reply('📦 **طلباتي:**\n\n' + list, { parse_mode: 'Markdown', ...homeKeyboard() });
+});
 
-// --- Service / order flow ---
-// 1. Click a service -> details + price + Confirm button
-// 2. Confirm -> payment page with payment info + Confirm payment button
-// 3. Confirm payment -> order pending, message "order in progress pending payment verification", admin notified
+bot.action('myorders', async (ctx) => {
+    await safeAnswer(ctx);
+    const { orders } = loadOrders();
+    const mine = orders.filter((o) => o.userId === String(ctx.from.id));
+    if (!mine.length) return safeEdit(ctx, '📦 **طلباتي**\n\nلسه ما عندك طلبات.', homeKeyboard());
+    const list = mine.slice(-10).map((o) => `• ${o.serviceTitle} - ${o.price || ''} - ${o.status === 'pending' ? 'قيد التنفيذ، بانتظار التأكد من الدفع' : o.status === 'confirmed' ? 'تم تأكيد الدفع' : 'مرفوض'}`).join('\n');
+    return safeEdit(ctx, '📦 **طلباتي:**\n\n' + list, homeKeyboard());
+});
+
+bot.action('home', async (ctx) => {
+    await safeAnswer(ctx);
+    return safeEdit(ctx, homeText(), homeKeyboard());
+});
 
 bot.action(/^section:(.+)$/, async (ctx) => {
     const id = ctx.match[1];
     const { sections } = loadSections();
     const sec = sections.find((s) => s.id === id);
-    await ctx.answerCbQuery();
-    if (!sec) return ctx.reply('هاد القسم مو موجود.');
+    await safeAnswer(ctx);
+    if (!sec) return safeEdit(ctx, 'هاد القسم مو موجود.', homeKeyboard());
     const priceLine = sec.price ? `\n💰 السعر: ${sec.price}` : '';
-    return ctx.reply(`**${sec.title}**\n\n${sec.text || ''}${priceLine}`, {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-            [Markup.button.callback('✅ تأكيد الطلب', `order:${sec.id}`)],
-            [Markup.button.callback('🔙 رجوع', 'home')]
-        ])
-    });
-});
-
-bot.action('home', async (ctx) => {
-    await ctx.answerCbQuery();
-    return ctx.reply('🛍️ **متجرنا**\n\nتصفح الأقسام من الأزرار تحت.', { parse_mode: 'Markdown', ...homeKeyboard() });
+    return safeEdit(ctx, `**${sec.title}**\n\n${sec.text || ''}${priceLine}`, Markup.inlineKeyboard([
+        [Markup.button.callback('✅ تأكيد الطلب', `order:${sec.id}`)],
+        [Markup.button.callback('🔙 رجوع', 'home')]
+    ]));
 });
 
 bot.action(/^order:(.+)$/, async (ctx) => {
     const id = ctx.match[1];
     const { sections } = loadSections();
     const sec = sections.find((s) => s.id === id);
-    await ctx.answerCbQuery();
-    if (!sec) return ctx.reply('هاد القسم مو موجود.');
+    await safeAnswer(ctx);
+    if (!sec) return safeEdit(ctx, 'هاد القسم مو موجود.', homeKeyboard());
     const cfg = loadConfig();
     const priceLine = sec.price ? `\n💰 السعر: ${sec.price}` : '';
-    return ctx.reply(
+    return safeEdit(ctx,
         `💳 **صفحة الدفع**\n\n**${sec.title}**${priceLine}\n\n${cfg.paymentInfo}\n\nبعد ما تدفع، كبس زر تأكيد الدفع تحت.`,
-        {
-            parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard([
-                [Markup.button.callback('💳 تأكيد الدفع', `pay:${sec.id}`)],
-                [Markup.button.callback('❌ إلغاء', 'home')]
-            ])
-        }
-    );
+        Markup.inlineKeyboard([
+            [Markup.button.callback('💳 تأكيد الدفع', `pay:${sec.id}`)],
+            [Markup.button.callback('❌ إلغاء', 'home')]
+        ]));
 });
 
 bot.action(/^pay:(.+)$/, async (ctx) => {
     const id = ctx.match[1];
     const { sections } = loadSections();
     const sec = sections.find((s) => s.id === id);
-    await ctx.answerCbQuery();
-    if (!sec) return ctx.reply('هاد القسم مو موجود.');
+    await safeAnswer(ctx);
+    if (!sec) return safeEdit(ctx, 'هاد القسم مو موجود.', homeKeyboard());
     const ordersData = loadOrders();
     const orderId = 'ord_' + Date.now();
     const order = {
@@ -124,7 +156,6 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
     };
     ordersData.orders.push(order);
     saveJSON(ORDERS_FILE, ordersData);
-    // Notify admin with approve / reject buttons
     if (ADMIN_ID) {
         try {
             await ctx.telegram.sendMessage(ADMIN_ID,
@@ -138,7 +169,7 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
                 });
         } catch (e) { console.error('Admin notify failed:', e.message); }
     }
-    return ctx.reply('⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nرح نبلغك بس نتأكد من الدفع.', { parse_mode: 'Markdown' });
+    return safeEdit(ctx, `⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${sec.title}\nرقم الطلب: \`${orderId}\`\n\nرح نبلغك بس نتأكد من الدفع.`, homeKeyboard());
 });
 
 bot.action(/^approve:(.+)$/, async (ctx) => {
@@ -146,29 +177,26 @@ bot.action(/^approve:(.+)$/, async (ctx) => {
     const orderId = ctx.match[1];
     const data = loadOrders();
     const order = data.orders.find((o) => o.id === orderId);
-    await ctx.answerCbQuery();
-    if (!order) return ctx.reply('الطلب مو موجود.');
+    await safeAnswer(ctx, 'تم التأكيد');
+    if (!order) return safeEdit(ctx, 'الطلب مو موجود.');
     order.status = 'confirmed';
     saveJSON(ORDERS_FILE, data);
     try { await ctx.telegram.sendMessage(order.userId, `✅ تم تأكيد الدفع واستلام طلبك: ${order.serviceTitle}\n\nطلبك قيد التنفيذ، شكراً لثقتك.`); } catch (e) {}
-    return ctx.reply(`تم تأكيد الدفع للطلب \`${orderId}\`، وبلغت الزبون.`, { parse_mode: 'Markdown' });
+    return safeEdit(ctx, `✅ تم تأكيد الدفع للطلب \`${orderId}\`، وبلغت الزبون.`);
 });
-
 bot.action(/^reject:(.+)$/, async (ctx) => {
     if (!isAdmin(ctx)) return;
     const orderId = ctx.match[1];
     const data = loadOrders();
     const order = data.orders.find((o) => o.id === orderId);
-    await ctx.answerCbQuery();
-    if (!order) return ctx.reply('الطلب مو موجود.');
+    await safeAnswer(ctx, 'تم الرفض');
+    if (!order) return safeEdit(ctx, 'الطلب مو موجود.');
     order.status = 'rejected';
     saveJSON(ORDERS_FILE, data);
     try { await ctx.telegram.sendMessage(order.userId, `❌ تم رفض طلبك: ${order.serviceTitle}\n\nتواصل مع الأدمن للتفاصيل.`); } catch (e) {}
-    return ctx.reply(`تم رفض الطلب \`${orderId}\`، وبلغت الزبون.`, { parse_mode: 'Markdown' });
+    return safeEdit(ctx, `❌ تم رفض الطلب \`${orderId}\`، وبلغت الزبون.`);
 });
 
-// --- Admin panel ---
-const pending = {};
 function adminKeyboard() {
     return Markup.inlineKeyboard([
         [Markup.button.callback('➕ إضافة خدمة / قسم', 'admin:add_section')],
@@ -179,146 +207,156 @@ function adminKeyboard() {
         [Markup.button.callback('🧾 عرض الطلبات', 'admin:orders')],
         [Markup.button.callback('💳 تعديل معلومات الدفع', 'admin:set_payment')],
         [Markup.button.callback('📊 إحصائيات', 'admin:stats')],
-        [Markup.button.callback('💾 نسخة احتياطية', 'admin:backup')]
+        [Markup.button.callback('💾 نسخة احتياطية', 'admin:backup')],
+        [Markup.button.callback('🏠 الرئيسية', 'home')]
     ]);
+}
+function adminText() {
+    return '👑 **لوحة تحكم الأدمن**\n\nمن هون بتضيف خدمة، وبتعدل نصها وسعرها، وبتحذفها، وبتعدل معلومات الدفع، وبتشوف الطلبات وبتأكد الدفع. كل تعديل بيبعتلك نسخة احتياطية تلقائياً على الخاص، لحتى ما يضيع شي.';
 }
 
 bot.command('admin', (ctx) => {
     if (!isAdmin(ctx)) return ctx.reply('هاد الأمر للأدمن بس.');
-    return ctx.reply('👑 **لوحة تحكم الأدمن**\n\nمن هون بتضيف خدمة، وبتعدل نصها وسعرها، وبتحذفها، وبتعدل معلومات الدفع، وبتشوف الطلبات وبتأكد الدفع. كل تعديل بيبعتلك نسخة احتياطية تلقائياً على الخاص، لحتى ما يضيع شي.', { parse_mode: 'Markdown', ...adminKeyboard() });
+    return ctx.reply(adminText(), { parse_mode: 'Markdown', ...adminKeyboard() });
 });
 
 bot.action('admin:add_section', async (ctx) => {
     if (!isAdmin(ctx)) return;
-    pending[ctx.from.id] = { step: 'add_title' };
-    await ctx.answerCbQuery();
-    return ctx.reply('أرسل اسم الخدمة / القسم الجديد، مثال: عرض 1');
+    const p = loadPending(); p[String(ctx.from.id)] = { step: 'add_title' }; savePending(p);
+    await safeAnswer(ctx);
+    return safeEdit(ctx, 'أرسل اسم الخدمة / القسم الجديد، مثال: عرض 1\n\nاكتب /cancel للإلغاء.', adminKeyboard());
 });
 bot.action('admin:edit_section', async (ctx) => {
     if (!isAdmin(ctx)) return;
     const { sections } = loadSections();
-    pending[ctx.from.id] = { step: 'edit_pick' };
-    await ctx.answerCbQuery();
-    return ctx.reply('أرسل رقم الخدمة اللي بدك تعدل نصها:\n' + sections.map((s, i) => `${i + 1}. ${s.title}`).join('\n'));
+    const p = loadPending(); p[String(ctx.from.id)] = { step: 'edit_pick' }; savePending(p);
+    await safeAnswer(ctx);
+    return safeEdit(ctx, 'أرسل رقم الخدمة اللي بدك تعدل نصها:\n' + (sections.map((s, i) => `${i + 1}. ${s.title}`).join('\n') || 'لا يوجد خدمات'), adminKeyboard());
 });
 bot.action('admin:edit_price', async (ctx) => {
     if (!isAdmin(ctx)) return;
     const { sections } = loadSections();
-    pending[ctx.from.id] = { step: 'price_pick' };
-    await ctx.answerCbQuery();
-    return ctx.reply('أرسل رقم الخدمة اللي بدك تعدل سعرها:\n' + sections.map((s, i) => `${i + 1}. ${s.title} - ${s.price || 'بدون سعر'}`).join('\n'));
+    const p = loadPending(); p[String(ctx.from.id)] = { step: 'price_pick' }; savePending(p);
+    await safeAnswer(ctx);
+    return safeEdit(ctx, 'أرسل رقم الخدمة اللي بدك تعدل سعرها:\n' + (sections.map((s, i) => `${i + 1}. ${s.title} - ${s.price || 'بدون سعر'}`).join('\n') || 'لا يوجد خدمات'), adminKeyboard());
 });
 bot.action('admin:del_section', async (ctx) => {
     if (!isAdmin(ctx)) return;
     const { sections } = loadSections();
-    pending[ctx.from.id] = { step: 'del_pick' };
-    await ctx.answerCbQuery();
-    return ctx.reply('أرسل رقم الخدمة اللي بدك تحذفها:\n' + sections.map((s, i) => `${i + 1}. ${s.title}`).join('\n'));
+    const p = loadPending(); p[String(ctx.from.id)] = { step: 'del_pick' }; savePending(p);
+    await safeAnswer(ctx);
+    return safeEdit(ctx, 'أرسل رقم الخدمة اللي بدك تحذفها:\n' + (sections.map((s, i) => `${i + 1}. ${s.title}`).join('\n') || 'لا يوجد خدمات'), adminKeyboard());
 });
 bot.action('admin:list_sections', async (ctx) => {
     if (!isAdmin(ctx)) return;
     const { sections } = loadSections();
-    await ctx.answerCbQuery();
-    if (!sections.length) return ctx.reply('لسه ما في خدمات، ضيف أول خدمة من زر إضافة خدمة.');
-    return ctx.reply('📋 **الخدمات:**\n\n' + sections.map((s, i) => `${i + 1}. ${s.title}\n${s.text || ''}\nالسعر: ${s.price || '-'}`).join('\n\n'), { parse_mode: 'Markdown' });
+    await safeAnswer(ctx);
+    if (!sections.length) return safeEdit(ctx, 'لسه ما في خدمات، ضيف أول خدمة من زر إضافة خدمة.', adminKeyboard());
+    return safeEdit(ctx, '📋 **الخدمات:**\n\n' + sections.map((s, i) => `${i + 1}. ${s.title}\n${s.text || ''}\nالسعر: ${s.price || '-'}`).join('\n\n'), adminKeyboard());
 });
 bot.action('admin:orders', async (ctx) => {
     if (!isAdmin(ctx)) return;
     const { orders } = loadOrders();
-    await ctx.answerCbQuery();
-    if (!orders.length) return ctx.reply('لسه ما في طلبات.');
+    await safeAnswer(ctx);
+    if (!orders.length) return safeEdit(ctx, 'لسه ما في طلبات.', adminKeyboard());
     const list = orders.slice(-10).map((o) => `${o.id} - ${o.serviceTitle} - ${o.price || ''} - ${o.status} - @${o.username || o.userId}`).join('\n');
-    return ctx.reply('🧾 **آخر الطلبات:**\n\n' + list);
+    return safeEdit(ctx, '🧾 **آخر الطلبات:**\n\n' + list, adminKeyboard());
 });
 bot.action('admin:set_payment', async (ctx) => {
     if (!isAdmin(ctx)) return;
-    pending[ctx.from.id] = { step: 'set_payment' };
-    await ctx.answerCbQuery();
-    return ctx.reply('أرسل معلومات الدفع الجديدة، مثال: ادفع 1$ على محفظة كذا، وبعدها كبس تأكيد الدفع.\n\nالمعلومات الحالية: ' + loadConfig().paymentInfo);
+    const p = loadPending(); p[String(ctx.from.id)] = { step: 'set_payment' }; savePending(p);
+    await safeAnswer(ctx);
+    return safeEdit(ctx, 'أرسل معلومات الدفع الجديدة.\n\nالمعلومات الحالية: ' + loadConfig().paymentInfo + '\n\nاكتب /cancel للإلغاء.', adminKeyboard());
 });
 bot.action('admin:stats', async (ctx) => {
     if (!isAdmin(ctx)) return;
     const sections = loadSections().sections.length;
     const orders = loadOrders().orders;
     const pendingCount = orders.filter((o) => o.status === 'pending').length;
-    await ctx.answerCbQuery();
-    return ctx.reply(`📊 **إحصائيات:**\n\nعدد الخدمات: ${sections}\nعدد الطلبات: ${orders.length}\nطلبات بانتظار التأكد: ${pendingCount}`);
+    await safeAnswer(ctx);
+    return safeEdit(ctx, `📊 **إحصائيات:**\n\nعدد الخدمات: ${sections}\nعدد الطلبات: ${orders.length}\nطلبات بانتظار التأكد: ${pendingCount}`, adminKeyboard());
 });
 bot.action('admin:backup', async (ctx) => {
     if (!isAdmin(ctx)) return;
-    await ctx.answerCbQuery();
+    await safeAnswer(ctx);
     await backupToAdmin(ctx);
-    return ctx.reply('تم إرسال النسخة الاحتياطية على الخاص.');
+    return safeEdit(ctx, 'تم إرسال النسخة الاحتياطية على الخاص.', adminKeyboard());
 });
 
 bot.on('text', async (ctx, next) => {
-    if (!isAdmin(ctx) || !pending[ctx.from.id]) return next();
-    const p = pending[ctx.from.id];
+    const allPending = loadPending();
+    const key = String(ctx.from.id);
+    if (!isAdmin(ctx) || !allPending[key]) return next();
+    if (ctx.message.text.trim() === '/cancel') {
+        delete allPending[key]; savePending(allPending);
+        return ctx.reply('تم الإلغاء.', { parse_mode: 'Markdown', ...adminKeyboard() });
+    }
+    const p = allPending[key];
     const text = ctx.message.text.trim();
     const data = loadSections();
+    const clear = () => { const pp = loadPending(); delete pp[key]; savePending(pp); };
     if (p.step === 'add_title') {
-        p.title = text; p.step = 'add_price';
+        p.title = text; p.step = 'add_price'; savePending(allPending);
         return ctx.reply('تمام، هلق أرسل سعر الخدمة، مثال: 1$');
     }
     if (p.step === 'add_price') {
-        p.price = text; p.step = 'add_text';
+        p.price = text; p.step = 'add_text'; savePending(allPending);
         return ctx.reply('تمام، هلق أرسل وصف الخدمة، مثال: 5 صفحات إكسل');
     }
     if (p.step === 'add_text') {
         const id = 'sec_' + Date.now();
         data.sections.push({ id, title: p.title, price: p.price, text });
         saveJSON(SECTIONS_FILE, data);
-        delete pending[ctx.from.id];
+        clear();
         await backupToAdmin(ctx);
-        return ctx.reply(`تمت إضافة الخدمة "${p.title}" بسعر ${p.price} بنجاح، وبعتلك نسخة احتياطية.`, { parse_mode: 'Markdown' });
+        return ctx.reply(`تمت إضافة الخدمة "${p.title}" بسعر ${p.price} بنجاح، وبعتلك نسخة احتياطية.`, { parse_mode: 'Markdown', ...adminKeyboard() });
     }
     if (p.step === 'edit_pick') {
         const idx = parseInt(text, 10) - 1;
-        if (isNaN(idx) || !data.sections[idx]) { delete pending[ctx.from.id]; return ctx.reply('رقم غير صحيح.'); }
-        p.idx = idx; p.step = 'edit_text';
+        if (isNaN(idx) || !data.sections[idx]) { clear(); return ctx.reply('رقم غير صحيح.'); }
+        p.idx = idx; p.step = 'edit_text'; savePending(allPending);
         return ctx.reply(`الخدمة الحالية: ${data.sections[idx].title}\nأرسل النص الجديد:`);
     }
     if (p.step === 'edit_text') {
         data.sections[p.idx].text = text;
         saveJSON(SECTIONS_FILE, data);
-        delete pending[ctx.from.id];
+        clear();
         await backupToAdmin(ctx);
-        return ctx.reply('تم تعديل نص الخدمة، وبعتلك نسخة احتياطية.');
+        return ctx.reply('تم تعديل نص الخدمة، وبعتلك نسخة احتياطية.', { parse_mode: 'Markdown', ...adminKeyboard() });
     }
     if (p.step === 'price_pick') {
         const idx = parseInt(text, 10) - 1;
-        if (isNaN(idx) || !data.sections[idx]) { delete pending[ctx.from.id]; return ctx.reply('رقم غير صحيح.'); }
-        p.idx = idx; p.step = 'price_new';
+        if (isNaN(idx) || !data.sections[idx]) { clear(); return ctx.reply('رقم غير صحيح.'); }
+        p.idx = idx; p.step = 'price_new'; savePending(allPending);
         return ctx.reply(`الخدمة الحالية: ${data.sections[idx].title} - السعر الحالي: ${data.sections[idx].price || '-'}\nأرسل السعر الجديد:`);
     }
     if (p.step === 'price_new') {
         data.sections[p.idx].price = text;
         saveJSON(SECTIONS_FILE, data);
-        delete pending[ctx.from.id];
+        clear();
         await backupToAdmin(ctx);
-        return ctx.reply('تم تعديل سعر الخدمة، وبعتلك نسخة احتياطية.');
+        return ctx.reply('تم تعديل سعر الخدمة، وبعتلك نسخة احتياطية.', { parse_mode: 'Markdown', ...adminKeyboard() });
     }
     if (p.step === 'del_pick') {
         const idx = parseInt(text, 10) - 1;
-        if (isNaN(idx) || !data.sections[idx]) { delete pending[ctx.from.id]; return ctx.reply('رقم غير صحيح.'); }
+        if (isNaN(idx) || !data.sections[idx]) { clear(); return ctx.reply('رقم غير صحيح.'); }
         const removed = data.sections.splice(idx, 1)[0];
         saveJSON(SECTIONS_FILE, data);
-        delete pending[ctx.from.id];
+        clear();
         await backupToAdmin(ctx);
-        return ctx.reply(`تم حذف الخدمة "${removed.title}"، وبعتلك نسخة احتياطية من الباقي.`);
+        return ctx.reply(`تم حذف الخدمة "${removed.title}"، وبعتلك نسخة احتياطية من الباقي.`, { parse_mode: 'Markdown', ...adminKeyboard() });
     }
     if (p.step === 'set_payment') {
         const cfg = loadConfig();
         cfg.paymentInfo = text;
         saveJSON(CONFIG_FILE, cfg);
-        delete pending[ctx.from.id];
+        clear();
         await backupToAdmin(ctx);
-        return ctx.reply('تم تعديل معلومات الدفع، وبعتلك نسخة احتياطية.');
+        return ctx.reply('تم تعديل معلومات الدفع، وبعتلك نسخة احتياطية.', { parse_mode: 'Markdown', ...adminKeyboard() });
     }
     return next();
 });
 
-// Restore backup by sending a JSON file to the bot (admin only)
 bot.on('document', async (ctx) => {
     if (!isAdmin(ctx)) return;
     try {
