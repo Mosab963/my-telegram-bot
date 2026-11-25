@@ -22,11 +22,7 @@ function saveJSON(file, data) {
     fs.writeFileSync(file, JSON.stringify(data, null, 2));
 }
 
-const DEFAULT_SECTIONS = [
-    { id: 'browse', title: '🛍️ تصفح الأكواد', text: 'تصفح أكواد موس المتوفرة من ناس حقيقية.' },
-    { id: 'add', title: '➕ أضف كودي', text: 'أضف كود الدعوة تبعك لحتى غيرك يستفيد منو.' },
-    { id: 'how', title: '❓ كيف تشتغل؟', text: 'الكود بيشتغل بس لحساب جديد، وخلال أول 48 ساعة من إنشاء الحساب، ومرة وحدة بس لكل حساب. التبادل مجاني.' }
-];
+const DEFAULT_SECTIONS = [];
 
 function loadCodes() { return loadJSON(CODES_FILE, { codes: [] }); }
 function loadSections() { return loadJSON(SECTIONS_FILE, { sections: DEFAULT_SECTIONS }); }
@@ -43,7 +39,6 @@ function isAdmin(ctx) { return ADMIN_ID && String(ctx.from.id) === ADMIN_ID; }
 function homeKeyboard() {
     const { sections } = loadSections();
     const rows = sections.map((s) => [Markup.button.callback(s.title, `section:${s.id}`)]);
-    rows.push([Markup.button.callback('❓ كيف تشتغل؟', 'section:how')]);
     return Markup.inlineKeyboard(rows);
 }
 
