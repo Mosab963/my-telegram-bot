@@ -20,6 +20,25 @@ bot.use(async (ctx, next) => {
         if (ctx.from && !isAdmin(ctx)) {
             const m = ctx.message || (ctx.callbackQuery && ctx.callbackQuery.message);
             if (m && m.message_id) trackChatMessage(String(ctx.from.id), m.message_id);
+            // Record the user; notify the admin once, on their very first
+            // interaction (not for customers already known from orders).
+            const uid = String(ctx.from.id);
+            const udata = loadUsers();
+            if (!udata.users[uid]) {
+                const knownFromOrders = loadOrders().orders.some((o) => o.userId === uid);
+                const name = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ') || 'بدون اسم';
+                udata.users[uid] = { userId: uid, name, username: ctx.from.username || '', firstSeen: new Date().toISOString(), lastSeen: new Date().toISOString() };
+                saveUsers(udata);
+                if (ADMIN_ID && !knownFromOrders) {
+                    try {
+                        await ctx.telegram.sendMessage(ADMIN_ID, `🆕 <b>مستخدم جديد</b>\n\n${customerLine({ name, username: ctx.from.username || '', userId: uid })}\nالوقت: ${new Date().toLocaleString('ar-SY')}`, { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.url('فتح محادثة المستخدم', `tg://user?id=${uid}`)]]) });
+                    } catch (e) {}
+                }
+            } else {
+                udata.users[uid].lastSeen = new Date().toISOString();
+                if (ctx.from.username) udata.users[uid].username = ctx.from.username;
+                saveUsers(udata);
+            }
         }
     } catch (e) {}
     return next();
@@ -35,6 +54,7 @@ const path = require('path');
 const DATA_DIR = os.tmpdir();
 const CODES_FILE = path.join(DATA_DIR, 'store-codes.json');
 const CHATS_FILE = path.join(DATA_DIR, 'store-chats.json');
+const USERS_FILE = path.join(DATA_DIR, 'store-users.json');
 const SECTIONS_FILE = path.join(DATA_DIR, 'store-services.json');
 const ORDERS_FILE = path.join(DATA_DIR, 'store-orders.json');
 const CONFIG_FILE = path.join(DATA_DIR, 'store-config.json');
@@ -91,6 +111,24 @@ function addOrUpdateService(title, price, text) {
 }
 function loadOrders() { return loadJSON(ORDERS_FILE, { orders: [] }); }
 function loadChats() { return loadJSON(CHATS_FILE, { chats: {} }); }
+function loadUsers() { return loadJSON(USERS_FILE, { users: {} }); }
+function saveUsers(data) { saveJSON(USERS_FILE, data); }
+// All users, merged with customers known from orders (so customers from
+// before this feature still appear in the users section).
+function getAllUsers() {
+    const data = loadUsers();
+    const users = { ...(data.users || {}) };
+    for (const o of loadOrders().orders) {
+        if (!o.userId) continue;
+        if (!users[o.userId]) {
+            users[o.userId] = { userId: o.userId, name: o.name || 'بدون اسم', username: o.username || '', firstSeen: o.createdAt || new Date().toISOString(), lastSeen: o.createdAt || new Date().toISOString() };
+        }
+    }
+    return users;
+}
+function countUserOrders(userId) {
+    return loadOrders().orders.filter((o) => o.userId === String(userId)).length;
+}
 function saveChats(data) { saveJSON(CHATS_FILE, data); }
 // Track every message id in a customer's chat with the bot (bot messages
 // and the customer's own messages), so the admin can later wipe the
@@ -149,13 +187,14 @@ async function kvSet(state) {
     } catch (e) { console.error('KV set error', e && e.message); return false; }
 }
 function readLocalState() {
-    return { sections: loadSections(), orders: loadOrders(), config: loadConfig(), chats: loadChats() };
+    return { sections: loadSections(), orders: loadOrders(), config: loadConfig(), chats: loadChats(), users: loadUsers() };
 }
 function writeLocalState(state) {
     if (state.sections) saveJSON(SECTIONS_FILE, state.sections);
     if (state.orders) saveJSON(ORDERS_FILE, state.orders);
     if (state.config) saveJSON(CONFIG_FILE, state.config);
     if (state.chats) saveJSON(CHATS_FILE, state.chats);
+    if (state.users) saveJSON(USERS_FILE, state.users);
 }
 async function syncFromKV() {
     if (!KV_URL || !KV_TOKEN) return;
@@ -560,6 +599,7 @@ function adminKeyboard() {
         [Markup.button.callback('📋 عرض الخدمات', 'admin:list_sections')],
         [Markup.button.callback('🧾 عرض الطلبات', 'admin:orders')],
         [Markup.button.callback('📦 أرشيف الطلبات', 'admin:archive')],
+        [Markup.button.callback('👥 المستخدمين', 'admin:users')],
         [Markup.button.callback('💳 تعديل معلومات الدفع', 'admin:set_payment')],
         [Markup.button.callback('📊 إحصائيات', 'admin:stats')],
         [Markup.button.callback('💾 نسخة احتياطية', 'admin:backup')],
@@ -668,6 +708,77 @@ bot.action(/^admin:archive:(.+)$/, async (ctx) => {
     if (!order) return safeEdit(ctx, 'الطلب مو موجود.', adminKeyboard());
     return showAdminView(ctx, orderDetailText(order), orderDetailKeyboard(order, 'archive'));
 });
+bot.action('admin:users', async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    await safeAnswer(ctx);
+    const users = Object.values(getAllUsers()).sort((a, b) => new Date(b.lastSeen) - new Date(a.lastSeen)).slice(0, 20);
+    if (!users.length) return showAdminView(ctx, 'لسه ما في مستخدمين.', adminKeyboard());
+    const list = users.map((u, i) => `${i + 1}. ${escapeHtml(u.name)} (${u.username ? '@' + escapeHtml(u.username) : 'بدون معرف'}) - طلبات: ${countUserOrders(u.userId)}`).join('\n');
+    const rows = users.map((u, i) => [Markup.button.callback(`${i + 1}. ${u.name}`, `admin:user:${u.userId}`)]);
+    rows.push([Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]);
+    return showAdminView(ctx, '👥 <b>المستخدمين:</b>\n\n' + list + '\n\nكبس على اسم المستخدم مشان تفتح تفاصيلو.', Markup.inlineKeyboard(rows));
+});
+bot.action(/^admin:user:(.+)$/, async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const userId = ctx.match[1];
+    await safeAnswer(ctx);
+    const users = getAllUsers();
+    const u = users[userId];
+    if (!u) return showAdminView(ctx, 'المستخدم مو موجود.', adminKeyboard());
+    const myOrders = loadOrders().orders.filter((o) => o.userId === userId);
+    const ordersList = myOrders.length ? myOrders.map((o, i) => `${i + 1}. ${escapeHtml(o.serviceTitle)} - ${o.price || ''} - ${o.status === 'confirmed' ? '✅ مؤكد' : o.status === 'rejected' ? '❌ مرفوض' : '⏳ بانتظار التأكد'}`).join('\n') : 'ما عندو طلبات بعد.';
+    const rows = myOrders.map((o, i) => [Markup.button.callback(`${i + 1}. ${escapeHtml(o.serviceTitle)}`, `admin:order:${o.id}`)]);
+    rows.push([Markup.button.callback('🗑️ مسح محادثة المستخدم', `clearuser:${userId}`)]);
+    rows.push([Markup.button.callback('🔙 رجوع للمستخدمين', 'admin:users')]);
+    rows.push([Markup.button.callback('🏠 لوحة التحكم', 'admin:home')]);
+    return showAdminView(ctx, `👥 <b>تفاصيل المستخدم</b>\n\n${customerLine({ name: u.name, username: u.username, userId: u.userId })}\nأول مرة: ${new Date(u.firstSeen).toLocaleString('ar-SY')}\nآخر ظهور: ${new Date(u.lastSeen).toLocaleString('ar-SY')}\nعدد الطلبات: ${myOrders.length}\n\n<b>طلباتو:</b>\n${ordersList}`, Markup.inlineKeyboard(rows));
+});
+bot.action(/^clearuser:(.+)$/, async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const userId = ctx.match[1];
+    await safeAnswer(ctx);
+    const u = getAllUsers()[userId];
+    if (!u) return safeEditHtml(ctx, 'المستخدم مو موجود.');
+    const count = (loadChats().chats[userId] || []).length;
+    return safeEditHtml(ctx, `🗑️ <b>مسح محادثة المستخدم</b>\n\n${customerLine({ name: u.name, username: u.username, userId: u.userId })}\n\nهاد رح يحذف ${count} رسالة من محادثة المستخدم مع البوت، من عند المستخدم.\n\nمتأكد؟`, Markup.inlineKeyboard([
+        [Markup.button.callback('✅ نعم، امسح المحادثة', `clearuserdo:${userId}`)],
+        [Markup.button.callback('❌ إلغاء', `cancelclearuser:${userId}`)]
+    ]));
+});
+bot.action(/^clearuserdo:(.+)$/, async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const userId = ctx.match[1];
+    await safeAnswer(ctx, 'عم امسح المحادثة...');
+    const u = getAllUsers()[userId];
+    if (!u) return safeEditHtml(ctx, 'المستخدم مو موجود.');
+    const chats = loadChats();
+    const ids = chats.chats[userId] || [];
+    let deleted = 0, failed = 0;
+    for (const mid of ids) {
+        try { await ctx.telegram.deleteMessage(userId, mid); deleted++; }
+        catch (e) { failed++; }
+    }
+    chats.chats[userId] = [];
+    saveChats(chats);
+    const note = failed ? `\n${failed} رسالة ما انحذفت، يمكن لأنها قديمة أو انحذفت من قبل.` : '';
+    return safeEditHtml(ctx, `🗑️ تم مسح محادثة المستخدم\n\nانحذف ${deleted} رسالة من عند المستخدم.${note}`, Markup.inlineKeyboard([
+        [Markup.button.callback('🔙 رجوع لتفاصيل المستخدم', `admin:user:${userId}`)],
+        [Markup.button.callback('🏠 لوحة التحكم', 'admin:home')]
+    ]));
+});
+bot.action(/^cancelclearuser:(.+)$/, async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const userId = ctx.match[1];
+    await safeAnswer(ctx);
+    const u = getAllUsers()[userId];
+    if (!u) return safeEditHtml(ctx, 'المستخدم مو موجود.');
+    return safeEditHtml(ctx, `👥 <b>تفاصيل المستخدم</b>\n\n${customerLine({ name: u.name, username: u.username, userId: u.userId })}`, Markup.inlineKeyboard([
+        [Markup.button.callback('🗑️ مسح محادثة المستخدم', `clearuser:${userId}`)],
+        [Markup.button.callback('🔙 رجوع للمستخدمين', 'admin:users')],
+        [Markup.button.callback('🏠 لوحة التحكم', 'admin:home')]
+    ]));
+});
+
 bot.action('admin:set_payment', async (ctx) => {
     if (!isAdmin(ctx)) return;
     await safeAnswer(ctx);
@@ -679,7 +790,12 @@ bot.action('admin:stats', async (ctx) => {
     const orders = loadOrders().orders;
     const pendingCount = orders.filter((o) => o.status === 'pending').length;
     await safeAnswer(ctx);
-    return showAdminView(ctx, `📊 <b>إحصائيات:</b>\n\nعدد الخدمات: ${sections}\nعدد الطلبات: ${orders.length}\nطلبات بانتظار التأكد: ${pendingCount}`, adminKeyboard());
+    const users = Object.values(getAllUsers());
+    const today = new Date().toISOString().slice(0, 10);
+    const newToday = users.filter((u) => (u.firstSeen || '').slice(0, 10) === today).length;
+    const confirmedCount = orders.filter((o) => o.status === 'confirmed').length;
+    const rejectedCount = orders.filter((o) => o.status === 'rejected').length;
+    return showAdminView(ctx, `📊 <b>إحصائيات شاملة:</b>\n\n👥 <b>المستخدمون:</b> ${users.length} (جدد اليوم: ${newToday})\n🧾 <b>الطلبات:</b> ${orders.length}\n⏳ بانتظار التأكد: ${pendingCount}\n✅ مكتملة (مؤكدة): ${confirmedCount}\n❌ مرفوضة: ${rejectedCount}\n📋 <b>الخدمات:</b> ${sections}`, adminKeyboard());
 });
 bot.action('admin:backup', async (ctx) => {
     if (!isAdmin(ctx)) return;
