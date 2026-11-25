@@ -448,14 +448,25 @@ bot.on('text', async (ctx, next) => {
         // (this is the common case - the user just types the number, without replying)
         if (!serviceId) {
             const ordersData = loadOrders();
-            const pendingOrder = ordersData.orders.filter((o) => o.userId === String(ctx.from.id) && o.status === 'pending' && !o.txNumber).slice(-1)[0];
+            let pendingOrder = ordersData.orders.filter((o) => o.userId === String(ctx.from.id) && o.status === 'pending' && !o.txNumber).slice(-1)[0];
+            // Forgiving fallback: the transaction number was sometimes sent
+            // from a different account/device than the one that clicked
+            // Confirm Payment. If this sender has no pending order, but
+            // there is a single recent pending order without a tx number
+            // (last 30 minutes), attach the number to it instead of
+            // leaving the user stuck. The admin is told the sender id.
+            let senderMismatch = false;
+            if (!pendingOrder) {
+                const recent = ordersData.orders.filter((o) => o.status === 'pending' && !o.txNumber && Date.now() - new Date(o.createdAt || 0).getTime() < 30 * 60 * 1000);
+                if (recent.length === 1) { pendingOrder = recent[0]; senderMismatch = true; }
+            }
             if (pendingOrder && text.length >= 3) {
                 pendingOrder.txNumber = text;
                 saveJSON(ORDERS_FILE, ordersData);
                 if (ADMIN_ID) {
                     try {
                         await ctx.telegram.sendMessage(ADMIN_ID,
-                            `🧾 **طلب جديد قيد التنفيذ**\n\nرقم الطلب: \`${pendingOrder.id}\`\nالخدمة: ${pendingOrder.serviceTitle}\nالسعر: ${pendingOrder.price || '-'}\nرقم المعاملة: \`${text}\`\nالزبون: ${pendingOrder.name} (@${pendingOrder.username || 'بدون معرف'})\nآيدي الزبون: \`${pendingOrder.userId}\`\nالحالة: بانتظار التأكد من الدفع`,
+                            `🧾 **طلب جديد قيد التنفيذ**\n\nرقم الطلب: \`${pendingOrder.id}\`\nالخدمة: ${pendingOrder.serviceTitle}\nالسعر: ${pendingOrder.price || '-'}\nرقم المعاملة: \`${text}\`\nالزبون: ${pendingOrder.name} (@${pendingOrder.username || 'بدون معرف'})\nآيدي الزبون: \`${pendingOrder.userId}\`${senderMismatch ? `\nتنبيه: رقم المعاملة انبعت من حساب تاني، آيدي المرسل: \`${ctx.from.id}\`` : ''}\nالحالة: بانتظار التأكد من الدفع`,
                             { parse_mode: 'Markdown', ...Markup.inlineKeyboard([
                                 [Markup.button.callback('✅ تأكيد الدفع واستلام الطلب', `approve:${pendingOrder.id}`)],
                                 [Markup.button.callback('❌ رفض الطلب', `reject:${pendingOrder.id}`)]
