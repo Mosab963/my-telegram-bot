@@ -136,6 +136,19 @@ async function syncToKV() {
     await kvSet(readLocalState());
 }
 
+
+function cleanMd(s) { return String(s || '').replace(/[*`\[\]]/g, ''); }
+function customerLine(o) {
+    const name = String(o.name || 'بدون اسم');
+    const user = o.username ? '@' + String(o.username) : 'بدون معرف';
+    return `الزبون: ${name} (${user})\nآيدي الزبون: ${o.userId}`;
+}
+function orderNotifyText(o, extra) {
+    const tx = o.txNumber ? `\nرقم المعاملة: ${o.txNumber}` : '';
+    const time = o.createdAt ? `\nالوقت: ${new Date(o.createdAt).toLocaleString('ar-SY')}` : '';
+    return `🧾 طلب جديد قيد التنفيذ\n\nرقم الطلب: ${o.id}\nالخدمة: ${o.serviceTitle}\nالسعر: ${o.price || '-'}${tx}\n${customerLine(o)}${time}\nالحالة: بانتظار التأكد من الدفع${extra || ''}`;
+}
+
 function isAdmin(ctx) { return ADMIN_ID && String(ctx.from.id) === ADMIN_ID; }
 
 async function safeEdit(ctx, text, extra) {
@@ -331,13 +344,14 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
     const orderId = order.id;
     if (ADMIN_ID) {
         try {
-            await ctx.telegram.sendMessage(ADMIN_ID,
-                `🧾 **طلب جديد قيد التنفيذ**\n\nرقم الطلب: \`${orderId}\`\nالخدمة: ${sec.title}\nالسعر: ${sec.price || '-'}\nالزبون: ${order.name} (@${order.username || 'بدون معرف'})\nآيدي الزبون: \`${order.userId}\`\nالحالة: بانتظار التأكد من الدفع`,
-                { parse_mode: 'Markdown', ...Markup.inlineKeyboard([
+            await ctx.telegram.sendMessage(ADMIN_ID, orderNotifyText(order),
+                { ...Markup.inlineKeyboard([
                     [Markup.button.callback('✅ تأكيد الدفع واستلام الطلب', `approve:${orderId}`)],
-                    [Markup.button.callback('❌ رفض الطلب', `reject:${orderId}`)]
+                    [Markup.button.callback('❌ رفض الطلب', `reject:${orderId}`)],
+                    [Markup.button.callback('💬 مراسلة الزبون', `msg:${orderId}`)],
+                    [Markup.button.url('فتح محادثة الزبون', `tg://user?id=${order.userId}`)]
                 ]) });
-        } catch (e) {}
+        } catch (e) { console.error('Admin notify failed:', e && e.message); }
     }
     // Edit the SAME payment message in place to ask for the transaction number.
     return safeEdit(ctx,
@@ -345,6 +359,16 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
         Markup.inlineKeyboard([
             [Markup.button.callback('❌ إلغاء الطلب', 'cancel')]
         ]));
+});
+
+bot.action(/^msg:(.+)$/, async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const orderId = ctx.match[1];
+    const data = loadOrders();
+    const order = data.orders.find((o) => o.id === orderId);
+    await safeAnswer(ctx);
+    if (!order) return safeEdit(ctx, 'الطلب مو موجود.');
+    return ctx.reply(`💬 مراسلة الزبون\n\n${customerLine(order)}\nالخدمة: ${order.serviceTitle}\nرقم الطلب: ${order.id}\n\nأرسل رسالتك للزبون:`, { ...Markup.forceReply() });
 });
 
 bot.action(/^approve:(.+)$/, async (ctx) => {
@@ -432,7 +456,7 @@ bot.action('admin:orders', async (ctx) => {
     const { orders } = loadOrders();
     await safeAnswer(ctx);
     if (!orders.length) return safeEdit(ctx, 'لسه ما في طلبات.', adminKeyboard());
-    const list = orders.slice(-10).map((o) => `${o.id} - ${o.serviceTitle} - ${o.price || ''} - ${o.status} - @${o.username || o.userId}`).join('\n');
+    const list = orders.slice(-10).map((o, i) => `${i + 1}. ${o.serviceTitle} - ${o.price || ''} - ${o.status}${o.txNumber ? ' - معاملة: ' + o.txNumber : ''}\n   ${customerLine(o).replace(/\n/g, ' | ')}\n   رقم الطلب: ${o.id}`).join('\n\n');
     return safeEdit(ctx, '🧾 **آخر الطلبات:**\n\n' + list, adminKeyboard());
 });
 bot.action('admin:set_payment', async (ctx) => {
@@ -490,7 +514,7 @@ bot.on('text', async (ctx, next) => {
                 const recent = ordersData.orders.filter((o) => o.status === 'pending' && !o.txNumber && Date.now() - new Date(o.createdAt || 0).getTime() < 30 * 60 * 1000);
                 if (recent.length) { pendingOrder = recent.slice(-1)[0]; senderMismatch = true; }
             }
-            if (pendingOrder && text.length >= 3) {
+            if (pendingOrder && /^[A-Za-z0-9_-]{3,}$/.test(text)) {
                 pendingOrder.txNumber = text;
                 saveJSON(ORDERS_FILE, ordersData);
                 if (ADMIN_ID) {
@@ -506,9 +530,9 @@ bot.on('text', async (ctx, next) => {
                 return ctx.reply(`⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${pendingOrder.serviceTitle}\nرقم الطلب: \`${pendingOrder.id}\`\nرقم المعاملة: \`${text}\`\n\nرح نبلغك بس نتأكد من الدفع.`, { parse_mode: 'Markdown', ...homeKeyboard() });
             }
             if (ADMIN_ID && text.length >= 3) {
-                try { await ctx.telegram.sendMessage(ADMIN_ID, `🧾 رقم معاملة وصل بدون طلب معلق\n\nالرقم: \`${text}\`\nالمرسل: ${ctx.from.first_name || ''} (@${ctx.from.username || 'بدون معرف'})\nآيدي المرسل: \`${ctx.from.id}\``); } catch (e) {}
+                try { await ctx.telegram.sendMessage(ADMIN_ID, `💬 رسالة من زبون\n\n${customerLine({ name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' '), username: ctx.from.username || '', userId: String(ctx.from.id) })}\n\nالرسالة: ${cleanMd(text)}`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.url('فتح محادثة الزبون', `tg://user?id=${ctx.from.id}`)]]) }); } catch (e) {}
             }
-            return ctx.reply('تم استلام رقم المعاملة، شكراً، ورح نتأكد من الدفع ونبلغك.', { parse_mode: 'Markdown', ...homeKeyboard() });
+            return ctx.reply('تم إرسال رسالتك للأدمن، رح يرد عليك.', { parse_mode: 'Markdown', ...homeKeyboard() });
         }
         const { sections } = loadSections();
         const sec = sections.find((s) => s.id === serviceId);
@@ -539,6 +563,20 @@ bot.on('text', async (ctx, next) => {
     const text = ctx.message.text.trim();
     if (text.startsWith('/')) return next();
     const replied = (ctx.message.reply_to_message && ctx.message.reply_to_message.text) || '';
+    // Replying to the message-customer prompt -> forward to that customer
+    if (replied.includes('أرسل رسالتك للزبون')) {
+        const m = replied.match(/ord_\d+/);
+        const orderId = m ? m[0] : '';
+        const data = loadOrders();
+        const order = data.orders.find((o) => o.id === orderId);
+        if (!order) return ctx.reply('ما لقيت الطلب، ابدأ من جديد من لوحة الطلبات.');
+        try {
+            await ctx.telegram.sendMessage(order.userId, `💬 رسالة من المتجر بخصوص طلبك (${order.serviceTitle}):\n\n${text}`);
+            return ctx.reply(`تم إرسال رسالتك للزبون ${order.name || order.userId}.`, { parse_mode: 'Markdown', ...adminKeyboard() });
+        } catch (e) {
+            return ctx.reply('ما قدرت ابعت الرسالة للزبون، يمكن حظر البوت أو ما فتح المحادثة معه بعد.');
+        }
+    }
     // Step 3: replying to the price prompt -> create the service
     if (replied.includes('أرسل سعر الخدمة')) {
         const name = parseField(replied, 'اسم الخدمة');
