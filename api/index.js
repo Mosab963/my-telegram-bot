@@ -55,6 +55,7 @@ const DATA_DIR = os.tmpdir();
 const CODES_FILE = path.join(DATA_DIR, 'store-codes.json');
 const CHATS_FILE = path.join(DATA_DIR, 'store-chats.json');
 const USERS_FILE = path.join(DATA_DIR, 'store-users.json');
+const DISCOUNTS_FILE = path.join(DATA_DIR, 'store-discounts.json');
 const SECTIONS_FILE = path.join(DATA_DIR, 'store-services.json');
 const ORDERS_FILE = path.join(DATA_DIR, 'store-orders.json');
 const CONFIG_FILE = path.join(DATA_DIR, 'store-config.json');
@@ -74,7 +75,7 @@ function saveJSON(file, data) {
     try { fs.writeFileSync(file, JSON.stringify(data, null, 2)); } catch (e) {}
 }
 
-const DEFAULT_SECTIONS = [{ id: 'sec_offer1', title: 'عرض 1', text: '1 مليار', price: '1$ أو 150 ليرة سورية' }];
+const DEFAULT_SECTIONS = [{ id: 'sec_offer1', title: 'عرض 1', text: '1 مليار', price: '1$ أو 150 ليرة سورية', category: 'عام' }];
 const DEFAULT_CONFIG = { paymentInfo: '💳 طرق الدفع:\n\n💵 شام كاش:\n`40ba4e3f2a3dc2a1759dbd26d21037c6`\n\n🟡 بينانس:\n`481984372`\n\nاضغط على الكود لنسخه، وبعد ما تدفع، كبس زر تأكيد الدفع تحت.' };
 
 function loadCodes() { return loadJSON(CODES_FILE, { codes: [] }); }
@@ -104,7 +105,7 @@ function addOrUpdateService(title, price, text) {
         saveJSON(SECTIONS_FILE, data);
         return { updated: true, service: existing };
     }
-    const service = { id: 'sec_' + Date.now(), title, price, text };
+    const service = { id: 'sec_' + Date.now(), title, price, text, category: 'عام' };
     data.sections.push(service);
     saveJSON(SECTIONS_FILE, data);
     return { updated: false, service };
@@ -112,6 +113,36 @@ function addOrUpdateService(title, price, text) {
 function loadOrders() { return loadJSON(ORDERS_FILE, { orders: [] }); }
 function loadChats() { return loadJSON(CHATS_FILE, { chats: {} }); }
 function loadUsers() { return loadJSON(USERS_FILE, { users: {} }); }
+function loadDiscounts() { return loadJSON(DISCOUNTS_FILE, { codes: [] }); }
+function saveDiscounts(data) { saveJSON(DISCOUNTS_FILE, data); }
+// Apply a percentage discount to every number in a free-text price,
+// e.g. "1$ أو 150 ليرة سورية" at 10% -> "0.9$ أو 135 ليرة سورية".
+function applyDiscount(priceStr, percent) {
+    return String(priceStr || '').replace(/\d+(?:[.,]\d+)?/g, (m) => {
+        const v = parseFloat(m.replace(',', '.')) * (1 - percent / 100);
+        const r = Math.round(v * 100) / 100;
+        return String(r).replace(/\.0$/, '').replace(/(\.\d)0$/, '$1');
+    });
+}
+function findDiscount(code) {
+    if (!code) return null;
+    return loadDiscounts().codes.find((c) => String(c.code).toUpperCase() === String(code).toUpperCase().trim()) || null;
+}
+// Average rating of a service from its rated orders.
+function serviceRating(serviceId) {
+    const rated = loadOrders().orders.filter((o) => o.serviceId === serviceId && typeof o.rating === 'number');
+    if (!rated.length) return null;
+    const avg = rated.reduce((s, o) => s + o.rating, 0) / rated.length;
+    return { avg: Math.round(avg * 10) / 10, count: rated.length };
+}
+function getCategories() {
+    const cats = [];
+    for (const s of loadSections().sections) {
+        const c = (s.category || 'عام').trim() || 'عام';
+        if (!cats.includes(c)) cats.push(c);
+    }
+    return cats.length ? cats : ['عام'];
+}
 function saveUsers(data) { saveJSON(USERS_FILE, data); }
 // All users, merged with customers known from orders (so customers from
 // before this feature still appear in the users section).
@@ -187,7 +218,7 @@ async function kvSet(state) {
     } catch (e) { console.error('KV set error', e && e.message); return false; }
 }
 function readLocalState() {
-    return { sections: loadSections(), orders: loadOrders(), config: loadConfig(), chats: loadChats(), users: loadUsers() };
+    return { sections: loadSections(), orders: loadOrders(), config: loadConfig(), chats: loadChats(), users: loadUsers(), discounts: loadDiscounts() };
 }
 function writeLocalState(state) {
     if (state.sections) saveJSON(SECTIONS_FILE, state.sections);
@@ -195,6 +226,7 @@ function writeLocalState(state) {
     if (state.config) saveJSON(CONFIG_FILE, state.config);
     if (state.chats) saveJSON(CHATS_FILE, state.chats);
     if (state.users) saveJSON(USERS_FILE, state.users);
+    if (state.discounts) saveJSON(DISCOUNTS_FILE, state.discounts);
 }
 async function syncFromKV() {
     if (!KV_URL || !KV_TOKEN) return;
@@ -261,6 +293,7 @@ function orderDetailKeyboard(o, from) {
     }
     rows.push([Markup.button.callback('💬 مراسلة الزبون', `msg:${o.id}`)]);
     rows.push([Markup.button.url('فتح محادثة الزبون', `tg://user?id=${o.userId}`)]);
+    if (o.proofPhoto) rows.push([Markup.button.callback('🖼️ عرض إثبات الدفع', `proof:${o.id}`)]);
     rows.push([Markup.button.callback('🗑️ مسح محادثة الزبون', `clear:${o.id}:${from}`)]);
     rows.push([Markup.button.callback('🔙 رجوع للطلبات', from === 'archive' ? 'admin:archive' : 'admin:orders')]);
     rows.push([Markup.button.callback('🏠 لوحة التحكم', 'admin:home')]);
@@ -269,14 +302,18 @@ function orderDetailKeyboard(o, from) {
 function orderDetailText(o) {
     const status = o.status === 'confirmed' ? '✅ مؤكد' : o.status === 'rejected' ? '❌ مرفوض' : '⏳ بانتظار التأكد من الدفع';
     const tx = o.txNumber ? `\nرقم المعاملة: <code>${escapeHtml(o.txNumber)}</code>` : '\nرقم المعاملة: لم يرسل بعد';
+    const disc = o.discountCode ? `\n🎟️ كود خصم: <code>${escapeHtml(o.discountCode)}</code> (خصم ${o.discountPercent}%) - السعر قبل الخصم: ${escapeHtml(o.priceBefore || '')}` : '';
+    const proof = o.proofPhoto ? '\n🖼️ إثبات الدفع: صورة مرفقة' : '';
+    const rating = typeof o.rating === 'number' ? `\n⭐ التقييم: ${'⭐'.repeat(o.rating)} (${o.rating}/5)` : '';
     const time = o.createdAt ? `\nالوقت: ${new Date(o.createdAt).toLocaleString('ar-SY')}` : '';
-    return `🧾 <b>تفاصيل الطلب</b>\n\nرقم الطلب: <code>${o.id}</code>\nالخدمة: ${escapeHtml(o.serviceTitle)}\nالسعر: ${escapeHtml(o.price || '-')}${tx}\n${customerLine(o)}${time}\nالحالة: ${status}`;
+    return `🧾 <b>تفاصيل الطلب</b>\n\nرقم الطلب: <code>${o.id}</code>\nالخدمة: ${escapeHtml(o.serviceTitle)}\nالسعر: ${escapeHtml(o.price || '-')}${disc}${tx}${proof}${rating}\n${customerLine(o)}${time}\nالحالة: ${status}`;
 }
 
 function orderNotifyText(o, extra) {
     const tx = o.txNumber ? `\nرقم المعاملة: <code>${escapeHtml(o.txNumber)}</code>` : '';
+    const disc = o.discountCode ? `\n🎟️ كود خصم: <code>${escapeHtml(o.discountCode)}</code> (خصم ${o.discountPercent}%)` : '';
     const time = o.createdAt ? `\nالوقت: ${new Date(o.createdAt).toLocaleString('ar-SY')}` : '';
-    return `🧾 <b>طلب جديد قيد التنفيذ</b>\n\nرقم الطلب: <code>${o.id}</code>\nالخدمة: ${escapeHtml(o.serviceTitle)}\nالسعر: ${escapeHtml(o.price || '-')}${tx}\n${customerLine(o)}${time}\nالحالة: بانتظار التأكد من الدفع${extra || ''}`;
+    return `🧾 <b>طلب جديد قيد التنفيذ</b>\n\nرقم الطلب: <code>${o.id}</code>\nالخدمة: ${escapeHtml(o.serviceTitle)}\nالسعر: ${escapeHtml(o.price || '-')}${disc}${tx}\n${customerLine(o)}${time}\nالحالة: بانتظار التأكد من الدفع${extra || ''}`;
 }
 
 function isAdmin(ctx) { return ADMIN_ID && String(ctx.from.id) === ADMIN_ID; }
@@ -315,9 +352,21 @@ async function safeAnswer(ctx, text) {
 
 function homeKeyboard() {
     const { sections } = loadSections();
-    const rows = sections.map((s) => [Markup.button.callback(s.title, `section:${s.id}`)]);
+    const cats = getCategories();
+    const rows = [];
+    if (cats.length > 1) {
+        for (const c of cats) rows.push([Markup.button.callback('🗂️ ' + c, `cat:${c}`)]);
+    } else {
+        for (const s of sections) rows.push([Markup.button.callback(s.title, `section:${s.id}`)]);
+    }
     rows.push([Markup.button.callback('📦 طلباتي', 'myorders')]);
     if (ADMIN_ID) rows.push([Markup.button.url('💬 تواصل مع الدعم', `tg://user?id=${ADMIN_ID}`)]);
+    return Markup.inlineKeyboard(rows);
+}
+function categoryKeyboard(cat) {
+    const { sections } = loadSections();
+    const rows = sections.filter((s) => ((s.category || 'عام').trim() || 'عام') === cat).map((s) => [Markup.button.callback(s.title, `section:${s.id}`)]);
+    rows.push([Markup.button.callback('🔙 رجوع', 'home')]);
     return Markup.inlineKeyboard(rows);
 }
 function homeText() {
@@ -375,6 +424,17 @@ bot.command('delservice', (ctx) => {
     const removed = data.sections.splice(n, 1)[0];
     saveJSON(SECTIONS_FILE, data);
     return ctx.reply(`تم حذف الخدمة "${removed.title}".`, { parse_mode: 'Markdown', ...adminKeyboard() });
+});
+bot.command('setcat', (ctx) => {
+    if (!isAdmin(ctx)) return ctx.reply('هاد الأمر للأدمن بس.');
+    const args = ctx.message.text.replace(/^\/setcat\s*/, '').trim();
+    const parts = args.split('|').map((s) => s.trim());
+    const n = parseInt(parts[0], 10) - 1;
+    const data = loadSections();
+    if (isNaN(n) || !data.sections[n] || !parts[1]) return ctx.reply('الصيغة: /setcat 1 | حسابات');
+    data.sections[n].category = parts[1];
+    saveJSON(SECTIONS_FILE, data);
+    return ctx.reply(`تم تصنيف الخدمة "${data.sections[n].title}" تحت "${parts[1]}".`, { parse_mode: 'Markdown', ...adminKeyboard() });
 });
 bot.command('setprice', (ctx) => {
     if (!isAdmin(ctx)) return ctx.reply('هاد الأمر للأدمن بس.');
@@ -434,6 +494,15 @@ bot.action('home', async (ctx) => {
     return safeEdit(ctx, homeText(), homeKeyboard());
 });
 
+bot.action(/^cat:(.+)$/, async (ctx) => {
+    const cat = ctx.match[1];
+    await safeAnswer(ctx);
+    const { sections } = loadSections();
+    const list = sections.filter((s) => ((s.category || 'عام').trim() || 'عام') === cat);
+    if (!list.length) return safeEdit(ctx, 'ما في خدمات بهالتصنيف بعد.', homeKeyboard());
+    return safeEdit(ctx, `🗂️ **${cat}**\n\nاختار الخدمة:`, categoryKeyboard(cat));
+});
+
 bot.action(/^section:(.+)$/, async (ctx) => {
     const id = ctx.match[1];
     const { sections } = loadSections();
@@ -441,31 +510,50 @@ bot.action(/^section:(.+)$/, async (ctx) => {
     await safeAnswer(ctx);
     if (!sec) return safeEdit(ctx, 'هاد القسم مو موجود.', homeKeyboard());
     const priceLine = sec.price ? `\n💰 السعر: ${sec.price}` : '';
-    return safeEdit(ctx, `**${sec.title}**\n\n${sec.text || ''}${priceLine}`, Markup.inlineKeyboard([
+    const rating = serviceRating(sec.id);
+    const ratingLine = rating ? `\n⭐ التقييم: ${rating.avg} (${rating.count} تقييم)` : '';
+    return safeEdit(ctx, `**${sec.title}**\n\n${sec.text || ''}${priceLine}${ratingLine}`, Markup.inlineKeyboard([
         [Markup.button.callback('✅ تأكيد الطلب', `order:${sec.id}`)],
+        [Markup.button.callback('🎟️ كود خصم', `discount:${sec.id}`)],
         [Markup.button.callback('❌ إلغاء', 'cancel')],
         [Markup.button.callback('🔙 رجوع', 'home')]
     ]));
 });
 
-bot.action(/^order:(.+)$/, async (ctx) => {
+bot.action(/^discount:(.+)$/, async (ctx) => {
     const id = ctx.match[1];
     const { sections } = loadSections();
     const sec = sections.find((s) => s.id === id);
     await safeAnswer(ctx);
     if (!sec) return safeEdit(ctx, 'هاد القسم مو موجود.', homeKeyboard());
+    return ctx.reply(`🎟️ **كود خصم**\n\nالخدمة: ${sec.title}\nالسعر: ${sec.price || '-'}\n\nأرسل كود الخصم:\n\nمعرف الخدمة: ${sec.id}`, { parse_mode: 'Markdown', ...Markup.forceReply() });
+});
+
+bot.action(/^order:(.+)$/, async (ctx) => {
+    const parts = ctx.match[1].split(':');
+    const id = parts[0];
+    const code = parts[1] || '';
+    const { sections } = loadSections();
+    const sec = sections.find((s) => s.id === id);
+    await safeAnswer(ctx);
+    if (!sec) return safeEdit(ctx, 'هاد القسم مو موجود.', homeKeyboard());
     const cfg = loadConfig();
+    const disc = findDiscount(code);
+    const priceAfter = disc ? applyDiscount(sec.price || '', disc.percent) : (sec.price || '');
     const priceLine = sec.price ? `\n💰 السعر: ${sec.price}` : '';
+    const discLine = disc ? `\n🎟️ كود ${disc.code}: خصم ${disc.percent}%\n💰 السعر بعد الخصم: ${priceAfter}` : '';
     return safeEdit(ctx,
-        `💳 **صفحة الدفع**\n\n**${sec.title}**${priceLine}\n\n${cfg.paymentInfo}`,
+        `💳 **صفحة الدفع**\n\n**${sec.title}**${priceLine}${discLine}\n\n${cfg.paymentInfo}`,
         Markup.inlineKeyboard([
-            [Markup.button.callback('💳 تأكيد الدفع', `pay:${sec.id}`)],
+            [Markup.button.callback('💳 تأكيد الدفع', `pay:${sec.id}${disc ? ':' + disc.code : ''}`)],
             [Markup.button.callback('❌ إلغاء', 'home')]
         ]));
 });
 
 bot.action(/^pay:(.+)$/, async (ctx) => {
-    const id = ctx.match[1];
+    const payParts = ctx.match[1].split(':');
+    const id = payParts[0];
+    const payCode = payParts[1] || '';
     const { sections } = loadSections();
     const sec = sections.find((s) => s.id === id);
     await safeAnswer(ctx, 'أرسل رقم المعاملة');
@@ -475,12 +563,21 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
     // transaction number is optional afterwards, not a blocker.
     const ordersData = loadOrders();
     ordersData.orders = ordersData.orders.filter((o) => !(o.userId === String(ctx.from.id) && o.status === 'pending' && !o.txNumber));
+    const payDisc = findDiscount(payCode);
     const order = {
-        id: 'ord_' + Date.now(), serviceId: sec.id, serviceTitle: sec.title, price: sec.price || '',
+        id: 'ord_' + Date.now(), serviceId: sec.id, serviceTitle: sec.title,
+        price: payDisc ? applyDiscount(sec.price || '', payDisc.percent) : (sec.price || ''),
+        priceBefore: payDisc ? (sec.price || '') : '',
+        discountCode: payDisc ? payDisc.code : '', discountPercent: payDisc ? payDisc.percent : 0,
         userId: String(ctx.from.id), username: ctx.from.username || '',
         name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' '),
         status: 'pending', txNumber: '', createdAt: new Date().toISOString()
     };
+    if (payDisc) {
+        const ddata = loadDiscounts();
+        const dc = ddata.codes.find((c) => c.code === payDisc.code);
+        if (dc) { dc.uses = (dc.uses || 0) + 1; saveDiscounts(ddata); }
+    }
     ordersData.orders.push(order);
     saveJSON(ORDERS_FILE, ordersData);
     const orderId = order.id;
@@ -492,7 +589,7 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
     }
     // Edit the SAME payment message in place to ask for the transaction number.
     return safeEdit(ctx,
-        `⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${sec.title}\nالسعر: ${sec.price || ''}\nرقم الطلب: \`${orderId}\`\n\nإذا بدك، أرسل رقم المعاملة:`,
+        `⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${sec.title}\nالسعر: ${sec.price || ''}\nرقم الطلب: \`${orderId}\`\n\nإذا بدك، أرسل رقم المعاملة أو صورة إيصال الدفع:`,
         Markup.inlineKeyboard([
             [Markup.button.callback('❌ إلغاء الطلب', 'cancel')]
         ]));
@@ -555,6 +652,21 @@ bot.action(/^cancelclear:(.+):(orders|archive|notif)$/, async (ctx) => {
     return safeEditHtml(ctx, orderDetailText(order), src === 'notif' ? orderActionKeyboard(order) : orderDetailKeyboard(order, src));
 });
 
+bot.action(/^proof:(.+)$/, async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const orderId = ctx.match[1];
+    const data = loadOrders();
+    const order = data.orders.find((o) => o.id === orderId);
+    await safeAnswer(ctx);
+    if (!order || !order.proofPhoto) return safeEditHtml(ctx, 'ما في إثبات دفع مرفق بهاد الطلب.');
+    try {
+        await ctx.telegram.sendPhoto(ADMIN_ID, order.proofPhoto, { caption: `🖼️ إثبات دفع الطلب <code>${orderId}</code> - ${escapeHtml(order.serviceTitle)}`, parse_mode: 'HTML' });
+    } catch (e) {
+        return safeEditHtml(ctx, 'ما قدرت ابعت الصورة، يمكن انحذفت من تيليجرام.');
+    }
+    return safeAnswer(ctx, 'تم إرسال إثبات الدفع');
+});
+
 bot.action(/^approve:(.+)$/, async (ctx) => {
     if (!isAdmin(ctx)) return;
     const orderId = ctx.match[1];
@@ -569,9 +681,28 @@ bot.action(/^approve:(.+)$/, async (ctx) => {
     order.status = 'confirmed';
     saveJSON(ORDERS_FILE, data);
     try { await ctx.telegram.sendMessage(order.userId, `✅ تم تأكيد الدفع واستلام طلبك: ${order.serviceTitle}\n\nطلبك قيد التنفيذ، شكراً لثقتك.`); } catch (e) {}
+    try {
+        await ctx.telegram.sendMessage(order.userId, `⭐ قيّم تجربتك معنا\n\nخدمة: ${order.serviceTitle}\n\nكيف كانت تجربتك؟`, { ...Markup.inlineKeyboard([[1, 2, 3, 4, 5].map((n) => Markup.button.callback('⭐'.repeat(n), `rate:${orderId}:${n}`))]) });
+    } catch (e) {}
     const nav = (ctx.callbackQuery && ctx.callbackQuery.message && ctx.callbackQuery.message.reply_markup && JSON.stringify(ctx.callbackQuery.message.reply_markup).includes('admin:orders'));
     return safeEditHtml(ctx, orderDetailText(order), nav ? orderDetailKeyboard(order, 'orders') : orderActionKeyboard(order));
 });
+bot.action(/^rate:(.+):([1-5])$/, async (ctx) => {
+    const orderId = ctx.match[1];
+    const stars = parseInt(ctx.match[2], 10);
+    const data = loadOrders();
+    const order = data.orders.find((o) => o.id === orderId);
+    await safeAnswer(ctx);
+    if (!order) return;
+    if (order.userId !== String(ctx.from.id)) return safeAnswer(ctx, 'هاد التقييم مو لطلبك.');
+    if (order.status !== 'confirmed') return safeAnswer(ctx, 'التقييم بيصير بعد تأكيد الطلب.');
+    if (typeof order.rating === 'number') return safeAnswer(ctx, 'قيّمت هاد الطلب من قبل، شكراً!');
+    order.rating = stars;
+    saveJSON(ORDERS_FILE, data);
+    await safeAnswer(ctx, 'شكراً على تقييمك!');
+    try { await ctx.editMessageText(`شكراً على تقييمك! ${'⭐'.repeat(stars)}\n\nخدمة: ${order.serviceTitle}`); } catch (e) {}
+});
+
 bot.action(/^reject:(.+)$/, async (ctx) => {
     if (!isAdmin(ctx)) return;
     const orderId = ctx.match[1];
@@ -597,6 +728,9 @@ function adminKeyboard() {
         [Markup.button.callback('💰 تعديل سعر خدمة', 'admin:edit_price')],
         [Markup.button.callback('🗑️ حذف خدمة', 'admin:del_section')],
         [Markup.button.callback('📋 عرض الخدمات', 'admin:list_sections')],
+        [Markup.button.callback('🗂️ تصنيف خدمة', 'admin:set_cat')],
+        [Markup.button.callback('🎟️ أكواد الخصم', 'admin:discounts')],
+        [Markup.button.callback('📣 بث إعلاني', 'admin:broadcast')],
         [Markup.button.callback('🧾 عرض الطلبات', 'admin:orders')],
         [Markup.button.callback('📦 أرشيف الطلبات', 'admin:archive')],
         [Markup.button.callback('👥 المستخدمين', 'admin:users')],
@@ -779,6 +913,73 @@ bot.action(/^cancelclearuser:(.+)$/, async (ctx) => {
     ]));
 });
 
+bot.action('admin:discounts', async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    await safeAnswer(ctx);
+    const codes = loadDiscounts().codes;
+    const list = codes.length ? codes.map((c, i) => `${i + 1}. <code>${escapeHtml(c.code)}</code> - خصم ${c.percent}% - استخدامات: ${c.uses || 0}`).join('\n') : 'لسه ما في أكواد خصم.';
+    const rows = codes.map((c) => [Markup.button.callback(`🗑️ حذف ${c.code}`, `delcode:${c.code}`)]);
+    rows.push([Markup.button.callback('➕ إضافة كود خصم', 'admin:addcode')]);
+    rows.push([Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]);
+    return showAdminView(ctx, '🎟️ <b>أكواد الخصم:</b>\n\n' + list, Markup.inlineKeyboard(rows));
+});
+bot.action('admin:addcode', async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    await safeAnswer(ctx);
+    return ctx.reply('🎟️ <b>إضافة كود خصم</b>\n\nأرسل الكود والنسبة بهالشكل:\n<code>MK10 | 10</code>\n\nاكتب /cancel للإلغاء.', { parse_mode: 'HTML', ...Markup.forceReply() });
+});
+bot.action(/^delcode:(.+)$/, async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const code = ctx.match[1];
+    await safeAnswer(ctx);
+    const data = loadDiscounts();
+    data.codes = data.codes.filter((c) => c.code !== code);
+    saveDiscounts(data);
+    const codes = data.codes;
+    const list = codes.length ? codes.map((c, i) => `${i + 1}. <code>${escapeHtml(c.code)}</code> - خصم ${c.percent}% - استخدامات: ${c.uses || 0}`).join('\n') : 'لسه ما في أكواد خصم.';
+    const rows = codes.map((c) => [Markup.button.callback(`🗑️ حذف ${c.code}`, `delcode:${c.code}`)]);
+    rows.push([Markup.button.callback('➕ إضافة كود خصم', 'admin:addcode')]);
+    rows.push([Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]);
+    return showAdminView(ctx, '🎟️ <b>أكواد الخصم:</b>\n\n' + list, Markup.inlineKeyboard(rows));
+});
+bot.action('admin:broadcast', async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    await safeAnswer(ctx);
+    return ctx.reply('📣 <b>بث إعلاني</b>\n\nأرسل نص الرسالة الإعلانية:\n\nاكتب /cancel للإلغاء.', { parse_mode: 'HTML', ...Markup.forceReply() });
+});
+bot.action('broadcast:send', async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    await safeAnswer(ctx, 'عم ببعت البث...');
+    const cfg = loadConfig();
+    const text = cfg.pendingBroadcast || '';
+    if (!text) return showAdminView(ctx, 'ما في رسالة بث محفوظة، ابدأ من جديد.', adminKeyboard());
+    const users = Object.values(getAllUsers()).filter((u) => u.userId !== ADMIN_ID);
+    let ok = 0, fail = 0;
+    for (const u of users) {
+        try { await ctx.telegram.sendMessage(u.userId, `📣 <b>MK_STORE</b>\n\n${escapeHtml(text)}`, { parse_mode: 'HTML' }); ok++; }
+        catch (e) { fail++; }
+        await new Promise((r) => setTimeout(r, 40));
+    }
+    cfg.pendingBroadcast = '';
+    saveJSON(CONFIG_FILE, cfg);
+    return showAdminView(ctx, `📣 <b>تم إرسال البث</b>\n\nوصل لـ ${ok} مستخدم، وفشل عند ${fail} مستخدم.`, adminKeyboard());
+});
+bot.action('broadcast:cancel', async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    await safeAnswer(ctx);
+    const cfg = loadConfig();
+    cfg.pendingBroadcast = '';
+    saveJSON(CONFIG_FILE, cfg);
+    return showAdminView(ctx, adminText(), adminKeyboard());
+});
+bot.action('admin:set_cat', async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const { sections } = loadSections();
+    await safeAnswer(ctx);
+    const list = sections.map((s, i) => `${i + 1}. ${escapeHtml(s.title)} - التصنيف الحالي: ${escapeHtml((s.category || 'عام').trim() || 'عام')}`).join('\n') || 'لا يوجد خدمات';
+    return showAdminView(ctx, '🗂️ <b>تصنيف خدمة</b>\n\nأرسل أمر واحد بهالشكل:\n<code>/setcat 1 | حسابات</code>\n\nالخدمات:\n' + list, adminPromptKeyboard());
+});
+
 bot.action('admin:set_payment', async (ctx) => {
     if (!isAdmin(ctx)) return;
     await safeAnswer(ctx);
@@ -818,6 +1019,24 @@ bot.on('text', async (ctx, next) => {
         const text = ctx.message.text.trim();
         if (text.startsWith('/')) return next();
         const replied = (ctx.message.reply_to_message && ctx.message.reply_to_message.text) || '';
+        // Replying to the discount-code prompt -> validate the code
+        if (replied.includes('أرسل كود الخصم')) {
+            const m = replied.match(/معرف الخدمة:\s*(\S+)/);
+            const secId = m ? m[1].trim() : '';
+            const { sections } = loadSections();
+            const sec = sections.find((s) => s.id === secId);
+            if (!sec) return ctx.reply('الخدمة مو موجودة، ابدأ من جديد بأمر /start');
+            const disc = findDiscount(text);
+            if (!disc) return ctx.reply('الكود مو صحيح أو منتهي، تأكد وحاول مرة تانية.', { parse_mode: 'Markdown', ...homeKeyboard() });
+            const priceAfter = applyDiscount(sec.price || '', disc.percent);
+            const rating = serviceRating(sec.id);
+            const ratingLine = rating ? `\n⭐ التقييم: ${rating.avg} (${rating.count} تقييم)` : '';
+            return ctx.reply(`**${sec.title}**\n\n${sec.text || ''}\n💰 السعر: ${sec.price || ''}\n🎟️ كود ${disc.code}: خصم ${disc.percent}%\n💰 السعر بعد الخصم: ${priceAfter}${ratingLine}`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard([
+                [Markup.button.callback('✅ تأكيد الطلب', `order:${sec.id}:${disc.code}`)],
+                [Markup.button.callback('❌ إلغاء', 'cancel')],
+                [Markup.button.callback('🔙 رجوع', 'home')]
+            ]) });
+        }
         let serviceId = '';
         if (replied.includes('أرسل رقم المعاملة')) {
             const m = replied.match(/معرف الخدمة:\s*(\S+)/);
@@ -909,6 +1128,30 @@ bot.on('text', async (ctx, next) => {
             return ctx.reply('ما قدرت ابعت الرسالة للزبون، يمكن حظر البوت أو ما فتح المحادثة معه بعد.');
         }
     }
+    // Replying to the add-code prompt -> create the discount code
+    if (replied.includes('أرسل الكود والنسبة')) {
+        const parts = text.split('|').map((s) => s.trim());
+        const code = (parts[0] || '').toUpperCase();
+        const percent = parseInt(parts[1], 10);
+        if (!code || isNaN(percent) || percent <= 0 || percent >= 100) return ctx.reply('الصيغة: MK10 | 10  (الكود، ثم نسبة الخصم من 1 لـ 99)');
+        const data = loadDiscounts();
+        const existing = data.codes.find((c) => c.code === code);
+        if (existing) existing.percent = percent;
+        else data.codes.push({ code, percent, uses: 0, createdAt: new Date().toISOString() });
+        saveDiscounts(data);
+        return ctx.reply(`تم حفظ كود الخصم ${code} بخصم ${percent}%.`, { parse_mode: 'Markdown', ...adminKeyboard() });
+    }
+    // Replying to the broadcast prompt -> preview + confirm
+    if (replied.includes('أرسل نص الرسالة الإعلانية')) {
+        const cfg = loadConfig();
+        cfg.pendingBroadcast = text;
+        saveJSON(CONFIG_FILE, cfg);
+        const count = Object.values(getAllUsers()).filter((u) => u.userId !== ADMIN_ID).length;
+        return showAdminView(ctx, `📣 <b>معاينة البث:</b>\n\n${escapeHtml(text)}\n\nرح يوصلك لـ ${count} مستخدم.\n\nمتأكد بدك تبعتو؟`, Markup.inlineKeyboard([
+            [Markup.button.callback('✅ إرسال للكل', 'broadcast:send')],
+            [Markup.button.callback('❌ إلغاء', 'broadcast:cancel')]
+        ]));
+    }
     // Step 3: replying to the price prompt -> create the service
     if (replied.includes('أرسل سعر الخدمة')) {
         const name = parseField(replied, 'اسم الخدمة');
@@ -942,6 +1185,39 @@ bot.on('text', async (ctx, next) => {
     }
     // Step 1: replying to the name prompt, or a plain text from the admin -> treat as the name
     return ctx.reply(`اسم الخدمة: ${text}\n\nأرسل وصف الخدمة:\n\nاكتب /cancel للإلغاء.`, { parse_mode: 'Markdown', ...Markup.forceReply() });
+});
+
+bot.on('photo', async (ctx) => {
+    if (isAdmin(ctx)) return;
+    const photos = ctx.message.photo || [];
+    if (!photos.length) return;
+    const fileId = photos[photos.length - 1].file_id;
+    const ordersData = loadOrders();
+    const uid = String(ctx.from.id);
+    let order = ordersData.orders.filter((o) => o.userId === uid && o.status === 'pending' && !o.proofPhoto).slice(-1)[0]
+        || ordersData.orders.filter((o) => o.userId === uid && o.status === 'pending').slice(-1)[0];
+    if (!order) {
+        const recent = ordersData.orders.filter((o) => o.status === 'pending' && !o.proofPhoto && Date.now() - new Date(o.createdAt || 0).getTime() < 30 * 60 * 1000);
+        if (recent.length) order = recent.slice(-1)[0];
+    }
+    if (order) {
+        order.proofPhoto = fileId;
+        saveJSON(ORDERS_FILE, ordersData);
+        if (ADMIN_ID) {
+            try {
+                await ctx.telegram.sendPhoto(ADMIN_ID, fileId, { caption: orderNotifyText(order) + '\n\n🖼️ إثبات دفع مرفق', parse_mode: 'HTML', ...orderActionKeyboard(order) });
+            } catch (e) { console.error('Proof notify failed:', e.message); }
+        }
+        return ctx.reply('تم استلام إثبات الدفع، رح نتأكد منو ونبلغك.', { parse_mode: 'Markdown', ...homeKeyboard() });
+    }
+    const hasOrder = ordersData.orders.some((o) => o.userId === uid);
+    if (!hasOrder) {
+        return ctx.reply('للتواصل مع الأدمن لازم يكون عندك طلب أولاً.\n\nتصفح الخدمات واطلب اللي بيناسبك، وبعدها بتقدر تراسلنا بخصوص طلبك.', { parse_mode: 'Markdown', ...homeKeyboard() });
+    }
+    if (ADMIN_ID) {
+        try { await ctx.telegram.sendPhoto(ADMIN_ID, fileId, { caption: `💬 صورة من زبون\n\n${customerLine({ name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' '), username: ctx.from.username || '', userId: uid })}`, parse_mode: 'HTML' }); } catch (e) {}
+    }
+    return ctx.reply('تم إرسال الصورة للأدمن، رح يرد عليك.', { parse_mode: 'Markdown', ...homeKeyboard() });
 });
 
 bot.on('document', async (ctx) => {
