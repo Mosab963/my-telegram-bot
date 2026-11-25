@@ -4,10 +4,17 @@ const fs = require('fs');
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const ADMIN_ID = process.env.ADMIN_ID ? String(process.env.ADMIN_ID).trim() : null;
 
-const CODES_FILE = './codes.json';
-const SECTIONS_FILE = './services.json';
-const ORDERS_FILE = './orders.json';
-const CONFIG_FILE = './config.json';
+const os = require('os');
+const path = require('path');
+// Vercel serverless filesystem is read-only except /tmp, so runtime files
+// MUST live in /tmp. Writing ./orders.json failed silently on every
+// request, which is why orders never survived to the next message and KV
+// was overwritten with empty orders every time.
+const DATA_DIR = os.tmpdir();
+const CODES_FILE = path.join(DATA_DIR, 'store-codes.json');
+const SECTIONS_FILE = path.join(DATA_DIR, 'store-services.json');
+const ORDERS_FILE = path.join(DATA_DIR, 'store-orders.json');
+const CONFIG_FILE = path.join(DATA_DIR, 'store-config.json');
 
 function loadJSON(file, fallback) {
     try {
@@ -84,12 +91,13 @@ const KV_URL = (process.env.KV_REST_API_URL || '').replace(/\/$/, '');
 const KV_TOKEN = process.env.KV_REST_API_TOKEN || '';
 const KV_KEY = 'store_bot_state_v1';
 async function kvGet() {
-    if (!KV_URL || !KV_TOKEN) return null;
+    if (!KV_URL || !KV_TOKEN) return undefined; // no KV configured
     try {
         const r = await fetch(KV_URL + '/get/' + KV_KEY, { headers: { Authorization: 'Bearer ' + KV_TOKEN } });
+        if (!r.ok) { console.error('KV get failed, status', r.status); return undefined; }
         const j = await r.json();
-        return j && j.result ? JSON.parse(j.result) : null;
-    } catch (e) { return null; }
+        return j && j.result ? JSON.parse(j.result) : null; // null = key missing
+    } catch (e) { console.error('KV get error', e && e.message); return undefined; }
 }
 async function kvSet(state) {
     if (!KV_URL || !KV_TOKEN) return false;
@@ -100,8 +108,9 @@ async function kvSet(state) {
             method: 'POST', headers: { Authorization: 'Bearer ' + KV_TOKEN }, signal: ctrl.signal
         });
         clearTimeout(timer);
+        if (!r.ok) console.error('KV set failed, status', r.status);
         return r.ok;
-    } catch (e) { return false; }
+    } catch (e) { console.error('KV set error', e && e.message); return false; }
 }
 function readLocalState() {
     return { sections: loadSections(), orders: loadOrders(), config: loadConfig() };
@@ -114,10 +123,11 @@ function writeLocalState(state) {
 async function syncFromKV() {
     if (!KV_URL || !KV_TOKEN) return;
     const state = await kvGet();
+    if (state === undefined) return; // KV unreachable: do NOT overwrite it
     if (state && (state.sections || state.orders || state.config)) {
         writeLocalState(state);
-    } else {
-        // First run with KV: seed it from the local (committed) files.
+    } else if (state === null) {
+        // Key genuinely missing: seed it from the local defaults.
         await kvSet(readLocalState());
     }
 }
@@ -495,7 +505,10 @@ bot.on('text', async (ctx, next) => {
                 }
                 return ctx.reply(`⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${pendingOrder.serviceTitle}\nرقم الطلب: \`${pendingOrder.id}\`\nرقم المعاملة: \`${text}\`\n\nرح نبلغك بس نتأكد من الدفع.`, { parse_mode: 'Markdown', ...homeKeyboard() });
             }
-            return ctx.reply('ما عندك طلب معلق حالياً، اختار خدمة من القائمة واطلبها.', { parse_mode: 'Markdown', ...homeKeyboard() });
+            if (ADMIN_ID && text.length >= 3) {
+                try { await ctx.telegram.sendMessage(ADMIN_ID, `🧾 رقم معاملة وصل بدون طلب معلق\n\nالرقم: \`${text}\`\nالمرسل: ${ctx.from.first_name || ''} (@${ctx.from.username || 'بدون معرف'})\nآيدي المرسل: \`${ctx.from.id}\``); } catch (e) {}
+            }
+            return ctx.reply('تم استلام رقم المعاملة، شكراً، ورح نتأكد من الدفع ونبلغك.', { parse_mode: 'Markdown', ...homeKeyboard() });
         }
         const { sections } = loadSections();
         const sec = sections.find((s) => s.id === serviceId);
