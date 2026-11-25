@@ -299,16 +299,21 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
     if (!sec) return safeEdit(ctx, 'هاد القسم مو موجود.', homeKeyboard());
     // Create the pending order NOW, so the next plain message from the user
     // (reply or not) can be recognised as the transaction number.
+    // Reuse an existing pending order for the same user+service, so repeated
+    // pay clicks do not pile up many pending orders for one user.
     const ordersData = loadOrders();
-    const orderId = 'ord_' + Date.now();
-    const order = {
-        id: orderId, serviceId: sec.id, serviceTitle: sec.title, price: sec.price || '',
-        userId: String(ctx.from.id), username: ctx.from.username || '',
-        name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' '),
-        status: 'pending', txNumber: '', createdAt: new Date().toISOString()
-    };
-    ordersData.orders.push(order);
-    saveJSON(ORDERS_FILE, ordersData);
+    let order = ordersData.orders.filter((o) => o.userId === String(ctx.from.id) && o.serviceId === sec.id && o.status === 'pending' && !o.txNumber).slice(-1)[0];
+    if (!order) {
+        order = {
+            id: 'ord_' + Date.now(), serviceId: sec.id, serviceTitle: sec.title, price: sec.price || '',
+            userId: String(ctx.from.id), username: ctx.from.username || '',
+            name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' '),
+            status: 'pending', txNumber: '', createdAt: new Date().toISOString()
+        };
+        ordersData.orders.push(order);
+        saveJSON(ORDERS_FILE, ordersData);
+    }
+    const orderId = order.id;
     // Edit the SAME payment message in place to ask for the transaction number.
     return safeEdit(ctx,
         `💳 **تأكيد الدفع**\n\nالخدمة: ${sec.title}\nالسعر: ${sec.price || ''}\nرقم الطلب: \`${orderId}\`\n\nأرسل رقم المعاملة:`,
@@ -458,7 +463,7 @@ bot.on('text', async (ctx, next) => {
             let senderMismatch = false;
             if (!pendingOrder) {
                 const recent = ordersData.orders.filter((o) => o.status === 'pending' && !o.txNumber && Date.now() - new Date(o.createdAt || 0).getTime() < 30 * 60 * 1000);
-                if (recent.length === 1) { pendingOrder = recent[0]; senderMismatch = true; }
+                if (recent.length) { pendingOrder = recent.slice(-1)[0]; senderMismatch = true; }
             }
             if (pendingOrder && text.length >= 3) {
                 pendingOrder.txNumber = text;
