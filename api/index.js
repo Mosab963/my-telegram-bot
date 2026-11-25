@@ -1,7 +1,29 @@
-const { Telegraf, Markup } = require('telegraf');
+const { Telegraf, Markup, Telegram } = require('telegraf');
 const fs = require('fs');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
+// Record every outgoing bot message to a customer (not to the admin).
+// Telegraf creates a new Telegram instance per update, so the prototype
+// must be wrapped, not bot.telegram.
+const _origSendMessage = Telegram.prototype.sendMessage;
+Telegram.prototype.sendMessage = async function (chatId, text, extra) {
+    const sent = await _origSendMessage.call(this, chatId, text, extra);
+    try {
+        if (sent && sent.message_id && String(chatId) !== ADMIN_ID) trackChatMessage(String(chatId), sent.message_id);
+    } catch (e) {}
+    return sent;
+};
+// Record every incoming customer message id (plain messages and the
+// message a pressed button sits on).
+bot.use(async (ctx, next) => {
+    try {
+        if (ctx.from && !isAdmin(ctx)) {
+            const m = ctx.message || (ctx.callbackQuery && ctx.callbackQuery.message);
+            if (m && m.message_id) trackChatMessage(String(ctx.from.id), m.message_id);
+        }
+    } catch (e) {}
+    return next();
+});
 const ADMIN_ID = process.env.ADMIN_ID ? String(process.env.ADMIN_ID).trim() : null;
 
 const os = require('os');
@@ -12,6 +34,7 @@ const path = require('path');
 // was overwritten with empty orders every time.
 const DATA_DIR = os.tmpdir();
 const CODES_FILE = path.join(DATA_DIR, 'store-codes.json');
+const CHATS_FILE = path.join(DATA_DIR, 'store-chats.json');
 const SECTIONS_FILE = path.join(DATA_DIR, 'store-services.json');
 const ORDERS_FILE = path.join(DATA_DIR, 'store-orders.json');
 const CONFIG_FILE = path.join(DATA_DIR, 'store-config.json');
@@ -67,6 +90,19 @@ function addOrUpdateService(title, price, text) {
     return { updated: false, service };
 }
 function loadOrders() { return loadJSON(ORDERS_FILE, { orders: [] }); }
+function loadChats() { return loadJSON(CHATS_FILE, { chats: {} }); }
+function saveChats(data) { saveJSON(CHATS_FILE, data); }
+// Track every message id in a customer's chat with the bot (bot messages
+// and the customer's own messages), so the admin can later wipe the
+// customer's chat clean. Kept to the last 200 ids per customer.
+function trackChatMessage(userId, messageId) {
+    if (!userId || !messageId) return;
+    const data = loadChats();
+    const list = data.chats[userId] || [];
+    if (!list.includes(messageId)) list.push(messageId);
+    data.chats[userId] = list.slice(-200);
+    saveChats(data);
+}
 function loadConfig() { return loadJSON(CONFIG_FILE, DEFAULT_CONFIG); }
 
 async function backupToAdmin(ctx) {
@@ -113,12 +149,13 @@ async function kvSet(state) {
     } catch (e) { console.error('KV set error', e && e.message); return false; }
 }
 function readLocalState() {
-    return { sections: loadSections(), orders: loadOrders(), config: loadConfig() };
+    return { sections: loadSections(), orders: loadOrders(), config: loadConfig(), chats: loadChats() };
 }
 function writeLocalState(state) {
     if (state.sections) saveJSON(SECTIONS_FILE, state.sections);
     if (state.orders) saveJSON(ORDERS_FILE, state.orders);
     if (state.config) saveJSON(CONFIG_FILE, state.config);
+    if (state.chats) saveJSON(CHATS_FILE, state.chats);
 }
 async function syncFromKV() {
     if (!KV_URL || !KV_TOKEN) return;
@@ -174,6 +211,7 @@ function orderActionKeyboard(o) {
     }
     rows.push([Markup.button.callback('💬 مراسلة الزبون', `msg:${o.id}`)]);
     rows.push([Markup.button.url('فتح محادثة الزبون', `tg://user?id=${o.userId}`)]);
+    rows.push([Markup.button.callback('🗑️ مسح محادثة الزبون', `clear:${o.id}:notif`)]);
     return Markup.inlineKeyboard(rows);
 }
 function orderDetailKeyboard(o, from) {
@@ -184,6 +222,7 @@ function orderDetailKeyboard(o, from) {
     }
     rows.push([Markup.button.callback('💬 مراسلة الزبون', `msg:${o.id}`)]);
     rows.push([Markup.button.url('فتح محادثة الزبون', `tg://user?id=${o.userId}`)]);
+    rows.push([Markup.button.callback('🗑️ مسح محادثة الزبون', `clear:${o.id}:${from}`)]);
     rows.push([Markup.button.callback('🔙 رجوع للطلبات', from === 'archive' ? 'admin:archive' : 'admin:orders')]);
     rows.push([Markup.button.callback('🏠 لوحة التحكم', 'admin:home')]);
     return Markup.inlineKeyboard(rows);
@@ -428,6 +467,53 @@ bot.action(/^msg:(.+)$/, async (ctx) => {
     await safeAnswer(ctx);
     if (!order) return safeEdit(ctx, 'الطلب مو موجود.');
     return ctx.reply(`💬 مراسلة الزبون\n\n${customerLine(order)}\nالخدمة: ${escapeHtml(order.serviceTitle)}\nرقم الطلب: <code>${order.id}</code>\n\nأرسل رسالتك للزبون:`, { parse_mode: 'HTML', ...Markup.forceReply() });
+});
+
+bot.action(/^clear:(.+):(orders|archive|notif)$/, async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const orderId = ctx.match[1];
+    const src = ctx.match[2];
+    const data = loadOrders();
+    const order = data.orders.find((o) => o.id === orderId);
+    await safeAnswer(ctx);
+    if (!order) return safeEditHtml(ctx, 'الطلب مو موجود.');
+    const count = (loadChats().chats[order.userId] || []).length;
+    return safeEditHtml(ctx, `🗑️ <b>مسح محادثة الزبون</b>\n\n${customerLine(order)}\nالخدمة: ${escapeHtml(order.serviceTitle)}\n\nهاد رح يحذف ${count} رسالة من محادثة الزبون مع البوت، من عند الزبون، مشان ما تضل معجقة عندو. رسائلك أنت مع البوت ما بتنمسح.\n\nمتأكد؟`, Markup.inlineKeyboard([
+        [Markup.button.callback('✅ نعم، امسح المحادثة', `cleardo:${orderId}:${src}`)],
+        [Markup.button.callback('❌ إلغاء', `cancelclear:${orderId}:${src}`)]
+    ]));
+});
+bot.action(/^cleardo:(.+):(orders|archive|notif)$/, async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const orderId = ctx.match[1];
+    const data = loadOrders();
+    const order = data.orders.find((o) => o.id === orderId);
+    await safeAnswer(ctx, 'عم امسح المحادثة...');
+    if (!order) return safeEditHtml(ctx, 'الطلب مو موجود.');
+    const chats = loadChats();
+    const ids = chats.chats[order.userId] || [];
+    let deleted = 0, failed = 0;
+    for (const mid of ids) {
+        try { await ctx.telegram.deleteMessage(order.userId, mid); deleted++; }
+        catch (e) { failed++; }
+    }
+    chats.chats[order.userId] = [];
+    saveChats(chats);
+    const note = failed ? `\n${failed} رسالة ما انحذفت، يمكن لأنها قديمة أو انحذفت من قبل.` : '';
+    return safeEditHtml(ctx, `🗑️ تم مسح محادثة الزبون\n\nانحذف ${deleted} رسالة من عند الزبون.${note}`, Markup.inlineKeyboard([
+        [Markup.button.callback('🔙 رجوع لتفاصيل الطلب', `admin:order:${orderId}`)],
+        [Markup.button.callback('🏠 لوحة التحكم', 'admin:home')]
+    ]));
+});
+bot.action(/^cancelclear:(.+):(orders|archive|notif)$/, async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const orderId = ctx.match[1];
+    const src = ctx.match[2];
+    const data = loadOrders();
+    const order = data.orders.find((o) => o.id === orderId);
+    await safeAnswer(ctx);
+    if (!order) return safeEditHtml(ctx, 'الطلب مو موجود.');
+    return safeEditHtml(ctx, orderDetailText(order), src === 'notif' ? orderActionKeyboard(order) : orderDetailKeyboard(order, src));
 });
 
 bot.action(/^approve:(.+)$/, async (ctx) => {
