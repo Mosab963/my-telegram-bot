@@ -143,6 +143,24 @@ function customerLine(o) {
     const user = o.username ? '@' + String(o.username) : 'بدون معرف';
     return `الزبون: ${name} (${user})\nآيدي الزبون: ${o.userId}`;
 }
+
+function orderDetailKeyboard(o) {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('✅ تأكيد الدفع واستلام الطلب', `approve:${o.id}`)],
+        [Markup.button.callback('❌ رفض الطلب', `reject:${o.id}`)],
+        [Markup.button.callback('💬 مراسلة الزبون', `msg:${o.id}`)],
+        [Markup.button.url('فتح محادثة الزبون', `tg://user?id=${o.userId}`)],
+        [Markup.button.callback('🔙 رجوع للطلبات', 'admin:orders')],
+        [Markup.button.callback('🏠 لوحة التحكم', 'admin:home')]
+    ]);
+}
+function orderDetailText(o) {
+    const status = o.status === 'confirmed' ? '✅ مؤكد' : o.status === 'rejected' ? '❌ مرفوض' : '⏳ بانتظار التأكد من الدفع';
+    const tx = o.txNumber ? `\nرقم المعاملة: ${o.txNumber}` : '\nرقم المعاملة: لم يرسل بعد';
+    const time = o.createdAt ? `\nالوقت: ${new Date(o.createdAt).toLocaleString('ar-SY')}` : '';
+    return `🧾 تفاصيل الطلب\n\nرقم الطلب: ${o.id}\nالخدمة: ${o.serviceTitle}\nالسعر: ${o.price || '-'}${tx}\n${customerLine(o)}${time}\nالحالة: ${status}`;
+}
+
 function orderNotifyText(o, extra) {
     const tx = o.txNumber ? `\nرقم المعاملة: ${o.txNumber}` : '';
     const time = o.createdAt ? `\nالوقت: ${new Date(o.createdAt).toLocaleString('ar-SY')}` : '';
@@ -381,7 +399,7 @@ bot.action(/^approve:(.+)$/, async (ctx) => {
     order.status = 'confirmed';
     saveJSON(ORDERS_FILE, data);
     try { await ctx.telegram.sendMessage(order.userId, `✅ تم تأكيد الدفع واستلام طلبك: ${order.serviceTitle}\n\nطلبك قيد التنفيذ، شكراً لثقتك.`); } catch (e) {}
-    return safeEdit(ctx, `✅ تم تأكيد الدفع للطلب \`${orderId}\`، وبلغت الزبون.`);
+    return safeEdit(ctx, orderDetailText(order), orderDetailKeyboard(order));
 });
 bot.action(/^reject:(.+)$/, async (ctx) => {
     if (!isAdmin(ctx)) return;
@@ -393,7 +411,7 @@ bot.action(/^reject:(.+)$/, async (ctx) => {
     order.status = 'rejected';
     saveJSON(ORDERS_FILE, data);
     try { await ctx.telegram.sendMessage(order.userId, `❌ تم رفض طلبك: ${order.serviceTitle}\n\nتواصل مع الأدمن للتفاصيل.`); } catch (e) {}
-    return safeEdit(ctx, `❌ تم رفض الطلب \`${orderId}\`، وبلغت الزبون.`);
+    return safeEdit(ctx, orderDetailText(order), orderDetailKeyboard(order));
 });
 
 function adminKeyboard() {
@@ -413,6 +431,12 @@ function adminKeyboard() {
 function adminText() {
     return '👑 **لوحة تحكم الأدمن**\n\nمن هون بتضيف خدمة، وبتعدل نصها وسعرها، وبتحذفها، وبتعدل معلومات الدفع، وبتشوف الطلبات وبتأكد الدفع. النسخة الاحتياطية بتاخدها من زر نسخة احتياطية وقت ما بدك.';
 }
+
+bot.action('admin:home', async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    await safeAnswer(ctx);
+    return safeEdit(ctx, adminText(), adminKeyboard());
+});
 
 bot.command('admin', (ctx) => {
     if (!isAdmin(ctx)) return ctx.reply('هاد الأمر للأدمن بس.');
@@ -456,8 +480,23 @@ bot.action('admin:orders', async (ctx) => {
     const { orders } = loadOrders();
     await safeAnswer(ctx);
     if (!orders.length) return safeEdit(ctx, 'لسه ما في طلبات.', adminKeyboard());
-    const list = orders.slice(-10).map((o, i) => `${i + 1}. ${o.serviceTitle} - ${o.price || ''} - ${o.status}${o.txNumber ? ' - معاملة: ' + o.txNumber : ''}\n   ${customerLine(o).replace(/\n/g, ' | ')}\n   رقم الطلب: ${o.id}`).join('\n\n');
-    return safeEdit(ctx, '🧾 **آخر الطلبات:**\n\n' + list, adminKeyboard());
+    const recent = orders.slice(-10);
+    const list = recent.map((o, i) => {
+        const status = o.status === 'confirmed' ? '✅ مؤكد' : o.status === 'rejected' ? '❌ مرفوض' : '⏳ بانتظار التأكد';
+        return `${i + 1}. ${o.serviceTitle} - ${o.price || ''} - ${status}${o.txNumber ? ' - معاملة: ' + o.txNumber : ''}\n   ${customerLine(o).replace(/\n/g, ' | ')}`;
+    }).join('\n\n');
+    const rows = recent.map((o, i) => [Markup.button.callback(`${i + 1}. ${o.serviceTitle} - ${o.status === 'pending' ? 'بانتظار التأكد' : o.status}`, `admin:order:${o.id}`)]);
+    rows.push([Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]);
+    return safeEdit(ctx, '🧾 **آخر الطلبات:**\n\n' + list + '\n\nكبس على رقم الطلب مشان تفتح تفاصيلو وتديره.', Markup.inlineKeyboard(rows));
+});
+bot.action(/^admin:order:(.+)$/, async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const orderId = ctx.match[1];
+    const data = loadOrders();
+    const order = data.orders.find((o) => o.id === orderId);
+    await safeAnswer(ctx);
+    if (!order) return safeEdit(ctx, 'الطلب مو موجود.', adminKeyboard());
+    return safeEdit(ctx, orderDetailText(order), orderDetailKeyboard(order));
 });
 bot.action('admin:set_payment', async (ctx) => {
     if (!isAdmin(ctx)) return;
