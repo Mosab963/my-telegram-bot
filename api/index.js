@@ -25,7 +25,7 @@ function saveJSON(file, data) {
 }
 
 const DEFAULT_SECTIONS = [];
-const DEFAULT_CONFIG = { paymentInfo: '💳 طرق الدفع:\n\n💵 شام كاش: 40ba4e3f2a3dc2a1759dbd26d21037c6\n\n🟡 بينانس: 481984372\n\nبعد ما تدفع، كبس زر تأكيد الدفع تحت.' };
+const DEFAULT_CONFIG = { paymentInfo: '💳 طرق الدفع:\n\n💵 شام كاش:\n`40ba4e3f2a3dc2a1759dbd26d21037c6`\n\n🟡 بينانس:\n`481984372`\n\nاضغط على الكود لنسخه، وبعد ما تدفع، كبس زر تأكيد الدفع تحت.' };
 
 function loadCodes() { return loadJSON(CODES_FILE, { codes: [] }); }
 function loadSections() { return loadJSON(SECTIONS_FILE, { sections: DEFAULT_SECTIONS }); }
@@ -155,8 +155,11 @@ bot.action('myorders', async (ctx) => {
     const { orders } = loadOrders();
     const mine = orders.filter((o) => o.userId === String(ctx.from.id));
     if (!mine.length) return safeEdit(ctx, '📦 **طلباتي**\n\nلسه ما عندك طلبات.', homeKeyboard());
-    const list = mine.slice(-10).map((o) => `• ${o.serviceTitle} - ${o.price || ''} - ${o.status === 'pending' ? 'قيد التنفيذ، بانتظار التأكد من الدفع' : o.status === 'confirmed' ? 'تم تأكيد الدفع' : 'مرفوض'}`).join('\n');
-    return safeEdit(ctx, '📦 **طلباتي:**\n\n' + list, homeKeyboard());
+    const list = mine.slice(-10).map((o) => `• ${o.serviceTitle} - ${o.price || ''} - ${o.txNumber ? 'معاملة: `' + o.txNumber + '` - ' : ''}${o.status === 'pending' ? 'قيد التنفيذ، بانتظار التأكد من الدفع' : o.status === 'confirmed' ? 'تم تأكيد الدفع' : 'مرفوض'}`).join('\n');
+    await safeAnswer(ctx, `عندك ${mine.length} طلبات`);
+    const ok = await safeEdit(ctx, '📦 **طلباتي:**\n\n' + list, homeKeyboard());
+    if (!ok) return ctx.reply('📦 **طلباتي:**\n\n' + list, { parse_mode: 'Markdown', ...homeKeyboard() });
+    return ok;
 });
 
 bot.action('home', async (ctx) => {
@@ -186,7 +189,7 @@ bot.action(/^order:(.+)$/, async (ctx) => {
     const cfg = loadConfig();
     const priceLine = sec.price ? `\n💰 السعر: ${sec.price}` : '';
     return safeEdit(ctx,
-        `💳 **صفحة الدفع**\n\n**${sec.title}**${priceLine}\n\n${cfg.paymentInfo}\n\nبعد ما تدفع، كبس زر تأكيد الدفع تحت.`,
+        `💳 **صفحة الدفع**\n\n**${sec.title}**${priceLine}\n\n${cfg.paymentInfo}`,
         Markup.inlineKeyboard([
             [Markup.button.callback('💳 تأكيد الدفع', `pay:${sec.id}`)],
             [Markup.button.callback('❌ إلغاء', 'home')]
@@ -199,35 +202,11 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
     const sec = sections.find((s) => s.id === id);
     await safeAnswer(ctx);
     if (!sec) return safeEdit(ctx, 'هاد القسم مو موجود.', homeKeyboard());
-    const ordersData = loadOrders();
-    const orderId = 'ord_' + Date.now();
-    const order = {
-        id: orderId,
-        serviceId: sec.id,
-        serviceTitle: sec.title,
-        price: sec.price || '',
-        userId: String(ctx.from.id),
-        username: ctx.from.username || '',
-        name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' '),
-        status: 'pending',
-        createdAt: new Date().toISOString()
-    };
-    ordersData.orders.push(order);
-    saveJSON(ORDERS_FILE, ordersData);
-    if (ADMIN_ID) {
-        try {
-            await ctx.telegram.sendMessage(ADMIN_ID,
-                `🧾 **طلب جديد قيد التنفيذ**\n\nرقم الطلب: \`${orderId}\`\nالخدمة: ${sec.title}\nالسعر: ${sec.price || '-'}\nالزبون: ${order.name} (@${order.username || 'بدون معرف'})\nآيدي الزبون: \`${order.userId}\`\nالحالة: بانتظار التأكد من الدفع`,
-                {
-                    parse_mode: 'Markdown',
-                    ...Markup.inlineKeyboard([
-                        [Markup.button.callback('✅ تأكيد الدفع واستلام الطلب', `approve:${orderId}`)],
-                        [Markup.button.callback('❌ رفض الطلب', `reject:${orderId}`)]
-                    ])
-                });
-        } catch (e) { console.error('Admin notify failed:', e.message); }
-    }
-    return safeEdit(ctx, `⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${sec.title}\nرقم الطلب: \`${orderId}\`\n\nرح نبلغك بس نتأكد من الدفع.`, homeKeyboard());
+    // Ask for the transaction number first, then the order is created and steps end.
+    return ctx.reply(
+        `💳 **تأكيد الدفع**\n\nالخدمة: ${sec.title}\nالسعر: ${sec.price || ''}\nمعرف الخدمة: ${sec.id}\n\nأرسل رقم المعاملة:`,
+        { parse_mode: 'Markdown', ...Markup.forceReply() }
+    );
 });
 
 bot.action(/^approve:(.+)$/, async (ctx) => {
@@ -347,6 +326,53 @@ function priceFrom(text) {
     return m ? m[0].trim() : '';
 }
 bot.on('text', async (ctx, next) => {
+    // Transaction number from a normal user (not admin)
+    if (!isAdmin(ctx)) {
+        const text = ctx.message.text.trim();
+        if (text.startsWith('/')) return next();
+        const replied = (ctx.message.reply_to_message && ctx.message.reply_to_message.text) || '';
+        let serviceId = '';
+        if (replied.includes('أرسل رقم المعاملة')) {
+            const m = replied.match(/معرف الخدمة:\s*(\S+)/);
+            serviceId = m ? m[1].trim() : '';
+        }
+        // Fallback: a plain transaction number from a user with a recent pending order
+        if (!serviceId) {
+            const ordersData = loadOrders();
+            const pendingOrder = ordersData.orders.filter((o) => o.userId === String(ctx.from.id) && o.status === 'pending' && !o.txNumber).slice(-1)[0];
+            if (pendingOrder && /^[A-Za-z0-9_-]{4,}$/.test(text)) {
+                pendingOrder.txNumber = text;
+                saveJSON(ORDERS_FILE, ordersData);
+                try { await ctx.telegram.sendMessage(ADMIN_ID, `🧾 تحديث طلب ${pendingOrder.id}: رقم المعاملة ${text}`); } catch (e) {}
+                return ctx.reply(`تم تأكيد رقم المعاملة ${text}، طلبك قيد التنفيذ ريثما يتم التأكد من الدفع.`);
+            }
+            return next();
+        }
+        const { sections } = loadSections();
+        const sec = sections.find((s) => s.id === serviceId);
+        if (!sec) return ctx.reply('الخدمة مو موجودة، ابدأ من جديد بأمر /start');
+        const ordersData = loadOrders();
+        const orderId = 'ord_' + Date.now();
+        const order = {
+            id: orderId, serviceId: sec.id, serviceTitle: sec.title, price: sec.price || '',
+            userId: String(ctx.from.id), username: ctx.from.username || '',
+            name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' '),
+            status: 'pending', txNumber: text, createdAt: new Date().toISOString()
+        };
+        ordersData.orders.push(order);
+        saveJSON(ORDERS_FILE, ordersData);
+        if (ADMIN_ID) {
+            try {
+                await ctx.telegram.sendMessage(ADMIN_ID,
+                    `🧾 **طلب جديد قيد التنفيذ**\n\nرقم الطلب: \`${orderId}\`\nالخدمة: ${sec.title}\nالسعر: ${sec.price || '-'}\nرقم المعاملة: \`${text}\`\nالزبون: ${order.name} (@${order.username || 'بدون معرف'})\nآيدي الزبون: \`${order.userId}\`\nالحالة: بانتظار التأكد من الدفع`,
+                    { parse_mode: 'Markdown', ...Markup.inlineKeyboard([
+                        [Markup.button.callback('✅ تأكيد الدفع واستلام الطلب', `approve:${orderId}`)],
+                        [Markup.button.callback('❌ رفض الطلب', `reject:${orderId}`)]
+                    ]) });
+            } catch (e) { console.error('Admin notify failed:', e.message); }
+        }
+        return ctx.reply(`⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${sec.title}\nرقم الطلب: \`${orderId}\`\nرقم المعاملة: \`${text}\`\n\nرح نبلغك بس نتأكد من الدفع.`, { parse_mode: 'Markdown', ...homeKeyboard() });
+    }
     if (!isAdmin(ctx)) return next();
     const text = ctx.message.text.trim();
     if (text.startsWith('/')) return next();
