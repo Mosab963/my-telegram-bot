@@ -24,7 +24,7 @@ function saveJSON(file, data) {
     try { fs.writeFileSync(file, JSON.stringify(data, null, 2)); } catch (e) {}
 }
 
-const DEFAULT_SECTIONS = [];
+const DEFAULT_SECTIONS = [{ id: 'sec_offer1', title: 'عرض 1', text: '1 مليار', price: '1$ أو 150 ليرة سورية' }];
 const DEFAULT_CONFIG = { paymentInfo: '💳 طرق الدفع:\n\n💵 شام كاش:\n`40ba4e3f2a3dc2a1759dbd26d21037c6`\n\n🟡 بينانس:\n`481984372`\n\nاضغط على الكود لنسخه، وبعد ما تدفع، كبس زر تأكيد الدفع تحت.' };
 
 function loadCodes() { return loadJSON(CODES_FILE, { codes: [] }); }
