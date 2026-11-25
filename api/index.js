@@ -94,9 +94,12 @@ async function kvGet() {
 async function kvSet(state) {
     if (!KV_URL || !KV_TOKEN) return false;
     try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 5000);
         const r = await fetch(KV_URL + '/set/' + KV_KEY + '/' + encodeURIComponent(JSON.stringify(state)), {
-            method: 'POST', headers: { Authorization: 'Bearer ' + KV_TOKEN }
+            method: 'POST', headers: { Authorization: 'Bearer ' + KV_TOKEN }, signal: ctrl.signal
         });
+        clearTimeout(timer);
         return r.ok;
     } catch (e) { return false; }
 }
@@ -162,6 +165,11 @@ bot.catch((err) => console.error('Bot error:', err));
 
 bot.start((ctx) => ctx.reply(homeText(), { parse_mode: 'Markdown', ...homeKeyboard() }));
 bot.command('store', (ctx) => ctx.reply(homeText(), { parse_mode: 'Markdown', ...homeKeyboard() }));
+bot.command('resetorders', (ctx) => {
+    if (!isAdmin(ctx)) return;
+    saveJSON(ORDERS_FILE, { orders: [] });
+    return ctx.reply('تم تصفير الطلبات، البوت صار نظيف، ما في طلبات معلقة.', { parse_mode: 'Markdown', ...adminKeyboard() });
+});
 bot.command('cancel', (ctx) => {
     if (isAdmin(ctx)) return ctx.reply('تم الإلغاء، رجعت للوحة التحكم.', { parse_mode: 'Markdown', ...adminKeyboard() });
     return ctx.reply('تم الإلغاء، رجعت للقائمة الرئيسية.', { parse_mode: 'Markdown', ...homeKeyboard() });
@@ -297,26 +305,33 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
     const sec = sections.find((s) => s.id === id);
     await safeAnswer(ctx, 'أرسل رقم المعاملة');
     if (!sec) return safeEdit(ctx, 'هاد القسم مو موجود.', homeKeyboard());
-    // Create the pending order NOW, so the next plain message from the user
-    // (reply or not) can be recognised as the transaction number.
-    // Reuse an existing pending order for the same user+service, so repeated
-    // pay clicks do not pile up many pending orders for one user.
+    // Reset: drop this user's stale pending orders without a tx number,
+    // then create ONE fresh order and finish the flow right here. The
+    // transaction number is optional afterwards, not a blocker.
     const ordersData = loadOrders();
-    let order = ordersData.orders.filter((o) => o.userId === String(ctx.from.id) && o.serviceId === sec.id && o.status === 'pending' && !o.txNumber).slice(-1)[0];
-    if (!order) {
-        order = {
-            id: 'ord_' + Date.now(), serviceId: sec.id, serviceTitle: sec.title, price: sec.price || '',
-            userId: String(ctx.from.id), username: ctx.from.username || '',
-            name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' '),
-            status: 'pending', txNumber: '', createdAt: new Date().toISOString()
-        };
-        ordersData.orders.push(order);
-        saveJSON(ORDERS_FILE, ordersData);
-    }
+    ordersData.orders = ordersData.orders.filter((o) => !(o.userId === String(ctx.from.id) && o.status === 'pending' && !o.txNumber));
+    const order = {
+        id: 'ord_' + Date.now(), serviceId: sec.id, serviceTitle: sec.title, price: sec.price || '',
+        userId: String(ctx.from.id), username: ctx.from.username || '',
+        name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' '),
+        status: 'pending', txNumber: '', createdAt: new Date().toISOString()
+    };
+    ordersData.orders.push(order);
+    saveJSON(ORDERS_FILE, ordersData);
     const orderId = order.id;
+    if (ADMIN_ID) {
+        try {
+            await ctx.telegram.sendMessage(ADMIN_ID,
+                `🧾 **طلب جديد قيد التنفيذ**\n\nرقم الطلب: \`${orderId}\`\nالخدمة: ${sec.title}\nالسعر: ${sec.price || '-'}\nالزبون: ${order.name} (@${order.username || 'بدون معرف'})\nآيدي الزبون: \`${order.userId}\`\nالحالة: بانتظار التأكد من الدفع`,
+                { parse_mode: 'Markdown', ...Markup.inlineKeyboard([
+                    [Markup.button.callback('✅ تأكيد الدفع واستلام الطلب', `approve:${orderId}`)],
+                    [Markup.button.callback('❌ رفض الطلب', `reject:${orderId}`)]
+                ]) });
+        } catch (e) {}
+    }
     // Edit the SAME payment message in place to ask for the transaction number.
     return safeEdit(ctx,
-        `💳 **تأكيد الدفع**\n\nالخدمة: ${sec.title}\nالسعر: ${sec.price || ''}\nرقم الطلب: \`${orderId}\`\n\nأرسل رقم المعاملة:`,
+        `⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${sec.title}\nالسعر: ${sec.price || ''}\nرقم الطلب: \`${orderId}\`\n\nإذا بدك، أرسل رقم المعاملة:`,
         Markup.inlineKeyboard([
             [Markup.button.callback('❌ إلغاء الطلب', 'cancel')]
         ]));
@@ -480,7 +495,7 @@ bot.on('text', async (ctx, next) => {
                 }
                 return ctx.reply(`⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${pendingOrder.serviceTitle}\nرقم الطلب: \`${pendingOrder.id}\`\nرقم المعاملة: \`${text}\`\n\nرح نبلغك بس نتأكد من الدفع.`, { parse_mode: 'Markdown', ...homeKeyboard() });
             }
-            return ctx.reply('أرسل رقم المعاملة أولاً، بعد ما تكبس تأكيد الدفع من صفحة الدفع.', { parse_mode: 'Markdown', ...homeKeyboard() });
+            return ctx.reply('ما عندك طلب معلق حالياً، اختار خدمة من القائمة واطلبها.', { parse_mode: 'Markdown', ...homeKeyboard() });
         }
         const { sections } = loadSections();
         const sec = sections.find((s) => s.id === serviceId);
