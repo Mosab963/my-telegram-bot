@@ -239,13 +239,26 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
     const id = ctx.match[1];
     const { sections } = loadSections();
     const sec = sections.find((s) => s.id === id);
-    await safeAnswer(ctx);
+    await safeAnswer(ctx, 'تم تأكيد الدفع');
     if (!sec) return safeEdit(ctx, 'هاد القسم مو موجود.', homeKeyboard());
-    // Ask for the transaction number first, then the order is created and steps end.
-    return ctx.reply(
-        `💳 **تأكيد الدفع**\n\nالخدمة: ${sec.title}\nالسعر: ${sec.price || ''}\nمعرف الخدمة: ${sec.id}\n\nأرسل رقم المعاملة:\n\nاكتب /cancel للإلغاء.`,
-        { parse_mode: 'Markdown', ...Markup.forceReply() }
-    );
+    // Create the pending order NOW, so the next plain message from the user
+    // (reply or not) can be recognised as the transaction number.
+    const ordersData = loadOrders();
+    const orderId = 'ord_' + Date.now();
+    const order = {
+        id: orderId, serviceId: sec.id, serviceTitle: sec.title, price: sec.price || '',
+        userId: String(ctx.from.id), username: ctx.from.username || '',
+        name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' '),
+        status: 'pending', txNumber: '', createdAt: new Date().toISOString()
+    };
+    ordersData.orders.push(order);
+    saveJSON(ORDERS_FILE, ordersData);
+    // Edit the SAME payment message in place to ask for the transaction number.
+    return safeEdit(ctx,
+        `💳 **تأكيد الدفع**\n\nالخدمة: ${sec.title}\nالسعر: ${sec.price || ''}\nرقم الطلب: \`${orderId}\`\nمعرف الخدمة: ${sec.id}\n\nأرسل رقم المعاملة:`,
+        Markup.inlineKeyboard([
+            [Markup.button.callback('❌ إلغاء الطلب', 'cancel')]
+        ]));
 });
 
 bot.action(/^approve:(.+)$/, async (ctx) => {
@@ -376,16 +389,26 @@ bot.on('text', async (ctx, next) => {
             serviceId = m ? m[1].trim() : '';
         }
         // Fallback: a plain transaction number from a user with a recent pending order
+        // (this is the common case - the user just types the number, without replying)
         if (!serviceId) {
             const ordersData = loadOrders();
             const pendingOrder = ordersData.orders.filter((o) => o.userId === String(ctx.from.id) && o.status === 'pending' && !o.txNumber).slice(-1)[0];
-            if (pendingOrder && /^[A-Za-z0-9_-]{4,}$/.test(text)) {
+            if (pendingOrder && text.length >= 3) {
                 pendingOrder.txNumber = text;
                 saveJSON(ORDERS_FILE, ordersData);
-                try { await ctx.telegram.sendMessage(ADMIN_ID, `🧾 تحديث طلب ${pendingOrder.id}: رقم المعاملة ${text}`); } catch (e) {}
-                return ctx.reply(`تم تأكيد رقم المعاملة ${text}، طلبك قيد التنفيذ ريثما يتم التأكد من الدفع.`);
+                if (ADMIN_ID) {
+                    try {
+                        await ctx.telegram.sendMessage(ADMIN_ID,
+                            `🧾 **طلب جديد قيد التنفيذ**\n\nرقم الطلب: \`${pendingOrder.id}\`\nالخدمة: ${pendingOrder.serviceTitle}\nالسعر: ${pendingOrder.price || '-'}\nرقم المعاملة: \`${text}\`\nالزبون: ${pendingOrder.name} (@${pendingOrder.username || 'بدون معرف'})\nآيدي الزبون: \`${pendingOrder.userId}\`\nالحالة: بانتظار التأكد من الدفع`,
+                            { parse_mode: 'Markdown', ...Markup.inlineKeyboard([
+                                [Markup.button.callback('✅ تأكيد الدفع واستلام الطلب', `approve:${pendingOrder.id}`)],
+                                [Markup.button.callback('❌ رفض الطلب', `reject:${pendingOrder.id}`)]
+                            ]) });
+                    } catch (e) {}
+                }
+                return ctx.reply(`⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${pendingOrder.serviceTitle}\nرقم الطلب: \`${pendingOrder.id}\`\nرقم المعاملة: \`${text}\`\n\nرح نبلغك بس نتأكد من الدفع.`, { parse_mode: 'Markdown', ...homeKeyboard() });
             }
-            return next();
+            return ctx.reply('أرسل رقم المعاملة أولاً، بعد ما تكبس تأكيد الدفع من صفحة الدفع.', { parse_mode: 'Markdown', ...homeKeyboard() });
         }
         const { sections } = loadSections();
         const sec = sections.find((s) => s.id === serviceId);
