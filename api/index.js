@@ -281,7 +281,9 @@ bot.command('admin', (ctx) => {
 bot.action('admin:add_section', async (ctx) => {
     if (!isAdmin(ctx)) return;
     await safeAnswer(ctx);
-    return safeEdit(ctx, '➕ **إضافة خدمة**\n\nأرسل أمر واحد بهالشكل:\n`/addservice عرض 1 | 1$ | وصف الخدمة`\n\nمثال:\n`/addservice عرض 1 | 1$ | 5 صفحات إكسل`', adminKeyboard());
+    // Multi-step, stateless: ask for the name with force_reply, so the admin's
+    // reply carries the step with it. No pending state is stored on the server.
+    return ctx.reply('➕ **إضافة خدمة**\n\nأرسل اسم الخدمة:', { parse_mode: 'Markdown', ...Markup.forceReply() });
 });
 bot.action('admin:edit_section', async (ctx) => {
     if (!isAdmin(ctx)) return;
@@ -336,9 +338,55 @@ bot.action('admin:backup', async (ctx) => {
     return safeEdit(ctx, 'تم إرسال النسخة الاحتياطية على الخاص.', adminKeyboard());
 });
 
+function parseField(text, label) {
+    const m = text.match(new RegExp(label + ':\\s*(.+)'));
+    return m ? m[1].trim() : '';
+}
+function priceFrom(text) {
+    const m = text.match(/(\d+(?:[.,]\d+)?\s*\$|\$\s*\d+)/);
+    return m ? m[0].trim() : '';
+}
 bot.on('text', async (ctx, next) => {
     if (!isAdmin(ctx)) return next();
-    return ctx.reply('لإضافة خدمة أرسل أمر واحد:\n`/addservice عرض 1 | 1$ | وصف الخدمة`\n\nولتعديل السعر: `/setprice 1 | 2$`\nولتعديل النص: `/edittext 1 | النص الجديد`\nوللحذف: `/delservice 1`', { parse_mode: 'Markdown', ...adminKeyboard() });
+    const text = ctx.message.text.trim();
+    if (text.startsWith('/')) return next();
+    const replied = (ctx.message.reply_to_message && ctx.message.reply_to_message.text) || '';
+    // Step 3: replying to the price prompt -> create the service
+    if (replied.includes('أرسل سعر الخدمة')) {
+        const name = parseField(replied, 'اسم الخدمة');
+        const desc = parseField(replied, 'الوصف');
+        if (!name) return ctx.reply('ما لقيت اسم الخدمة، ابدأ من جديد بزر إضافة خدمة.');
+        const data = loadSections();
+        data.sections.push({ id: 'sec_' + Date.now(), title: name, price: text, text: desc });
+        saveJSON(SECTIONS_FILE, data);
+        await backupToAdmin(ctx);
+        return ctx.reply(`تمت إضافة الخدمة "${name}" بسعر ${text} بنجاح.`, { parse_mode: 'Markdown', ...adminKeyboard() });
+    }
+    // Step 2: replying to the description prompt -> ask price, or finish if price included
+    if (replied.includes('أرسل وصف الخدمة')) {
+        const name = parseField(replied, 'اسم الخدمة');
+        if (!name) return ctx.reply('ما لقيت اسم الخدمة، ابدأ من جديد بزر إضافة خدمة.');
+        const parts = text.split('|').map((s) => s.trim());
+        if (parts.length >= 2) {
+            const data = loadSections();
+            data.sections.push({ id: 'sec_' + Date.now(), title: name, price: parts[1], text: parts[0] });
+            saveJSON(SECTIONS_FILE, data);
+            await backupToAdmin(ctx);
+            return ctx.reply(`تمت إضافة الخدمة "${name}" بسعر ${parts[1]} بنجاح.`, { parse_mode: 'Markdown', ...adminKeyboard() });
+        }
+        const price = priceFrom(text);
+        if (price) {
+            const desc = text.replace(price, '').trim();
+            const data = loadSections();
+            data.sections.push({ id: 'sec_' + Date.now(), title: name, price, text: desc });
+            saveJSON(SECTIONS_FILE, data);
+            await backupToAdmin(ctx);
+            return ctx.reply(`تمت إضافة الخدمة "${name}" بسعر ${price} بنجاح.`, { parse_mode: 'Markdown', ...adminKeyboard() });
+        }
+        return ctx.reply(`اسم الخدمة: ${name}\nالوصف: ${text}\n\nأرسل سعر الخدمة:`, { parse_mode: 'Markdown', ...Markup.forceReply() });
+    }
+    // Step 1: replying to the name prompt, or a plain text from the admin -> treat as the name
+    return ctx.reply(`اسم الخدمة: ${text}\n\nأرسل وصف الخدمة:`, { parse_mode: 'Markdown', ...Markup.forceReply() });
 });
 
 bot.on('document', async (ctx) => {
