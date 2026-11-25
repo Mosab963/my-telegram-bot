@@ -71,6 +71,58 @@ async function backupToAdmin(ctx) {
     } catch (e) { console.error('Backup failed:', e.message); }
 }
 
+// ---- Persistent storage: Vercel KV (Upstash Redis, REST) ----
+// The bot runs on Vercel serverless, whose filesystem is wiped on every
+// redeploy, so services/orders were lost on every code update. Vercel KV
+// survives redeploys. When KV_REST_API_URL + KV_REST_API_TOKEN are set
+// (Vercel dashboard > Storage > create a KV database, linked to this
+// project), the whole state is synced to KV on every webhook request:
+// load from KV at the start, save to KV at the end. Without KV, the bot
+// falls back to the local files (committed defaults survive, new runtime
+// additions do not survive a redeploy).
+const KV_URL = (process.env.KV_REST_API_URL || '').replace(/\/$/, '');
+const KV_TOKEN = process.env.KV_REST_API_TOKEN || '';
+const KV_KEY = 'store_bot_state_v1';
+async function kvGet() {
+    if (!KV_URL || !KV_TOKEN) return null;
+    try {
+        const r = await fetch(KV_URL + '/get/' + KV_KEY, { headers: { Authorization: 'Bearer ' + KV_TOKEN } });
+        const j = await r.json();
+        return j && j.result ? JSON.parse(j.result) : null;
+    } catch (e) { return null; }
+}
+async function kvSet(state) {
+    if (!KV_URL || !KV_TOKEN) return false;
+    try {
+        const r = await fetch(KV_URL + '/set/' + KV_KEY + '/' + encodeURIComponent(JSON.stringify(state)), {
+            method: 'POST', headers: { Authorization: 'Bearer ' + KV_TOKEN }
+        });
+        return r.ok;
+    } catch (e) { return false; }
+}
+function readLocalState() {
+    return { sections: loadSections(), orders: loadOrders(), config: loadConfig() };
+}
+function writeLocalState(state) {
+    if (state.sections) saveJSON(SECTIONS_FILE, state.sections);
+    if (state.orders) saveJSON(ORDERS_FILE, state.orders);
+    if (state.config) saveJSON(CONFIG_FILE, state.config);
+}
+async function syncFromKV() {
+    if (!KV_URL || !KV_TOKEN) return;
+    const state = await kvGet();
+    if (state && (state.sections || state.orders || state.config)) {
+        writeLocalState(state);
+    } else {
+        // First run with KV: seed it from the local (committed) files.
+        await kvSet(readLocalState());
+    }
+}
+async function syncToKV() {
+    if (!KV_URL || !KV_TOKEN) return;
+    await kvSet(readLocalState());
+}
+
 function isAdmin(ctx) { return ADMIN_ID && String(ctx.from.id) === ADMIN_ID; }
 
 async function safeEdit(ctx, text, extra) {
@@ -504,7 +556,9 @@ module.exports = async (req, res) => {
                 seenUpdates.add(updateId);
                 if (seenUpdates.size > 1000) seenUpdates.clear();
             }
+            await syncFromKV();
             await bot.handleUpdate(req.body);
+            await syncToKV();
             return res.status(200).send('OK');
         }
         return res.status(200).send('Muse Code Exchange Store is Live.');
