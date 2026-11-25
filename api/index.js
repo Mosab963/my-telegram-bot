@@ -128,6 +128,19 @@ function findDiscount(code) {
     if (!code) return null;
     return loadDiscounts().codes.find((c) => String(c.code).toUpperCase() === String(code).toUpperCase().trim()) || null;
 }
+// A code is global when its serviceIds list is empty; otherwise it only
+// applies to the listed services.
+function discountApplies(disc, serviceId) {
+    if (!disc) return false;
+    if (!disc.serviceIds || !disc.serviceIds.length) return true;
+    return disc.serviceIds.includes(serviceId);
+}
+function discountScopeText(disc) {
+    if (!disc.serviceIds || !disc.serviceIds.length) return 'عام (كل الخدمات)';
+    const { sections } = loadSections();
+    const names = disc.serviceIds.map((id) => { const s = sections.find((x) => x.id === id); return s ? s.title : id; });
+    return 'خاص بـ: ' + names.join('، ');
+}
 // Average rating of a service from its rated orders.
 function serviceRating(serviceId) {
     const rated = loadOrders().orders.filter((o) => o.serviceId === serviceId && typeof o.rating === 'number');
@@ -539,13 +552,14 @@ bot.action(/^order:(.+)$/, async (ctx) => {
     if (!sec) return safeEdit(ctx, 'هاد القسم مو موجود.', homeKeyboard());
     const cfg = loadConfig();
     const disc = findDiscount(code);
-    const priceAfter = disc ? applyDiscount(sec.price || '', disc.percent) : (sec.price || '');
+    const discOk = disc && discountApplies(disc, sec.id) ? disc : null;
+    const priceAfter = discOk ? applyDiscount(sec.price || '', discOk.percent) : (sec.price || '');
     const priceLine = sec.price ? `\n💰 السعر: ${sec.price}` : '';
-    const discLine = disc ? `\n🎟️ كود ${disc.code}: خصم ${disc.percent}%\n💰 السعر بعد الخصم: ${priceAfter}` : '';
+    const discLine = discOk ? `\n🎟️ كود ${discOk.code}: خصم ${discOk.percent}%\n💰 السعر بعد الخصم: ${priceAfter}` : '';
     return safeEdit(ctx,
         `💳 **صفحة الدفع**\n\n**${sec.title}**${priceLine}${discLine}\n\n${cfg.paymentInfo}`,
         Markup.inlineKeyboard([
-            [Markup.button.callback('💳 تأكيد الدفع', `pay:${sec.id}${disc ? ':' + disc.code : ''}`)],
+            [Markup.button.callback('💳 تأكيد الدفع', `pay:${sec.id}${discOk ? ':' + discOk.code : ''}`)],
             [Markup.button.callback('❌ إلغاء', 'home')]
         ]));
 });
@@ -563,7 +577,8 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
     // transaction number is optional afterwards, not a blocker.
     const ordersData = loadOrders();
     ordersData.orders = ordersData.orders.filter((o) => !(o.userId === String(ctx.from.id) && o.status === 'pending' && !o.txNumber));
-    const payDisc = findDiscount(payCode);
+    const payDiscRaw = findDiscount(payCode);
+    const payDisc = payDiscRaw && discountApplies(payDiscRaw, sec.id) ? payDiscRaw : null;
     const order = {
         id: 'ord_' + Date.now(), serviceId: sec.id, serviceTitle: sec.title,
         price: payDisc ? applyDiscount(sec.price || '', payDisc.percent) : (sec.price || ''),
@@ -917,8 +932,8 @@ bot.action('admin:discounts', async (ctx) => {
     if (!isAdmin(ctx)) return;
     await safeAnswer(ctx);
     const codes = loadDiscounts().codes;
-    const list = codes.length ? codes.map((c, i) => `${i + 1}. <code>${escapeHtml(c.code)}</code> - خصم ${c.percent}% - استخدامات: ${c.uses || 0}`).join('\n') : 'لسه ما في أكواد خصم.';
-    const rows = codes.map((c) => [Markup.button.callback(`🗑️ حذف ${c.code}`, `delcode:${c.code}`)]);
+    const list = codes.length ? codes.map((c, i) => `${i + 1}. <code>${escapeHtml(c.code)}</code> - خصم ${c.percent}% - استخدامات: ${c.uses || 0} - ${escapeHtml(discountScopeText(c))}`).join('\n') : 'لسه ما في أكواد خصم.';
+    const rows = codes.map((c) => [Markup.button.callback(`🎯 تخصيص ${c.code}`, `assign:${c.code}`), Markup.button.callback(`🗑️ حذف ${c.code}`, `delcode:${c.code}`)]);
     rows.push([Markup.button.callback('➕ إضافة كود خصم', 'admin:addcode')]);
     rows.push([Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]);
     return showAdminView(ctx, '🎟️ <b>أكواد الخصم:</b>\n\n' + list, Markup.inlineKeyboard(rows));
@@ -936,12 +951,56 @@ bot.action(/^delcode:(.+)$/, async (ctx) => {
     data.codes = data.codes.filter((c) => c.code !== code);
     saveDiscounts(data);
     const codes = data.codes;
-    const list = codes.length ? codes.map((c, i) => `${i + 1}. <code>${escapeHtml(c.code)}</code> - خصم ${c.percent}% - استخدامات: ${c.uses || 0}`).join('\n') : 'لسه ما في أكواد خصم.';
-    const rows = codes.map((c) => [Markup.button.callback(`🗑️ حذف ${c.code}`, `delcode:${c.code}`)]);
+    const list = codes.length ? codes.map((c, i) => `${i + 1}. <code>${escapeHtml(c.code)}</code> - خصم ${c.percent}% - استخدامات: ${c.uses || 0} - ${escapeHtml(discountScopeText(c))}`).join('\n') : 'لسه ما في أكواد خصم.';
+    const rows = codes.map((c) => [Markup.button.callback(`🎯 تخصيص ${c.code}`, `assign:${c.code}`), Markup.button.callback(`🗑️ حذف ${c.code}`, `delcode:${c.code}`)]);
     rows.push([Markup.button.callback('➕ إضافة كود خصم', 'admin:addcode')]);
     rows.push([Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]);
     return showAdminView(ctx, '🎟️ <b>أكواد الخصم:</b>\n\n' + list, Markup.inlineKeyboard(rows));
 });
+bot.action(/^assign:(.+)$/, async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const code = ctx.match[1];
+    await safeAnswer(ctx);
+    const disc = findDiscount(code);
+    if (!disc) return showAdminView(ctx, 'الكود مو موجود.', adminKeyboard());
+    const { sections } = loadSections();
+    const ids = disc.serviceIds || [];
+    const rows = sections.map((s) => [Markup.button.callback(`${ids.includes(s.id) ? '✅ ' : '⬜ '}${s.title}`, `toggle:${code}:${s.id}`)]);
+    rows.push([Markup.button.callback('🌍 عام (كل الخدمات)', `assignall:${code}`)]);
+    rows.push([Markup.button.callback('🔙 رجوع لأكواد الخصم', 'admin:discounts')]);
+    return showAdminView(ctx, `🎯 <b>تخصيص الكود ${escapeHtml(code)}</b>\n\nالنطاق الحالي: ${escapeHtml(discountScopeText(disc))}\n\nكبس على خدمة مشان تضيفها أو تشيلها من الكود. إذا ما اخترت ولا خدمة، الكود بيضل عام وبيشتغل على الكل.`, Markup.inlineKeyboard(rows));
+});
+bot.action(/^toggle:(.+):(.+)$/, async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const code = ctx.match[1];
+    const secId = ctx.match[2];
+    await safeAnswer(ctx);
+    const data = loadDiscounts();
+    const disc = data.codes.find((c) => c.code === code);
+    if (!disc) return showAdminView(ctx, 'الكود مو موجود.', adminKeyboard());
+    disc.serviceIds = disc.serviceIds || [];
+    const i = disc.serviceIds.indexOf(secId);
+    if (i >= 0) disc.serviceIds.splice(i, 1);
+    else disc.serviceIds.push(secId);
+    saveDiscounts(data);
+    const { sections } = loadSections();
+    const rows = sections.map((s) => [Markup.button.callback(`${disc.serviceIds.includes(s.id) ? '✅ ' : '⬜ '}${s.title}`, `toggle:${code}:${s.id}`)]);
+    rows.push([Markup.button.callback('🌍 عام (كل الخدمات)', `assignall:${code}`)]);
+    rows.push([Markup.button.callback('🔙 رجوع لأكواد الخصم', 'admin:discounts')]);
+    return showAdminView(ctx, `🎯 <b>تخصيص الكود ${escapeHtml(code)}</b>\n\nالنطاق الحالي: ${escapeHtml(discountScopeText(disc))}\n\nكبس على خدمة مشان تضيفها أو تشيلها من الكود. إذا ما اخترت ولا خدمة، الكود بيضل عام وبيشتغل على الكل.`, Markup.inlineKeyboard(rows));
+});
+bot.action(/^assignall:(.+)$/, async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const code = ctx.match[1];
+    await safeAnswer(ctx);
+    const data = loadDiscounts();
+    const disc = data.codes.find((c) => c.code === code);
+    if (!disc) return showAdminView(ctx, 'الكود مو موجود.', adminKeyboard());
+    disc.serviceIds = [];
+    saveDiscounts(data);
+    return showAdminView(ctx, `🎯 الكود ${escapeHtml(code)} صار عام وبيشتغل على كل الخدمات.`, adminKeyboard());
+});
+
 bot.action('admin:broadcast', async (ctx) => {
     if (!isAdmin(ctx)) return;
     await safeAnswer(ctx);
@@ -1028,6 +1087,7 @@ bot.on('text', async (ctx, next) => {
             if (!sec) return ctx.reply('الخدمة مو موجودة، ابدأ من جديد بأمر /start');
             const disc = findDiscount(text);
             if (!disc) return ctx.reply('الكود مو صحيح أو منتهي، تأكد وحاول مرة تانية.', { parse_mode: 'Markdown', ...homeKeyboard() });
+            if (!discountApplies(disc, sec.id)) return ctx.reply('هاد الكود مو صالح لهالخدمة، هو مخصص لخدمة تانية.', { parse_mode: 'Markdown', ...homeKeyboard() });
             const priceAfter = applyDiscount(sec.price || '', disc.percent);
             const rating = serviceRating(sec.id);
             const ratingLine = rating ? `\n⭐ التقييم: ${rating.avg} (${rating.count} تقييم)` : '';
