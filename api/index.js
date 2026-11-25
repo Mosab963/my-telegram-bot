@@ -44,12 +44,12 @@ function homeKeyboard() {
 
 bot.start((ctx) => {
     return ctx.reply(
-        '🛍️ **أهلاً فيك بمتجر تبادل أكواد موس!**\n\nهون بتلاقي أكواد دعوة من ناس حقيقية من دول مختلفة، وبتضيف كودك لحتى غيرك يستفيد منو.\n\n⚠️ مهم: الكود بيشتغل بس لحساب جديد، وخلال أول 48 ساعة من إنشاء الحساب، ومرة وحدة بس لكل حساب. ما في بيع تفعيل، التبادل مجاني.',
+        '🛍️ **أهلاً فيك بمتجرنا!**\n\nتصفح الأقسام من الأزرار تحت، واختار اللي بيناسبك.',
         { parse_mode: 'Markdown', ...homeKeyboard() }
     );
 });
 
-bot.command('store', (ctx) => ctx.reply('🛍️ **متجر تبادل أكواد موس**', { parse_mode: 'Markdown', ...homeKeyboard() }));
+bot.command('store', (ctx) => ctx.reply('🛍️ **متجرنا**\n\nتصفح الأقسام من الأزرار تحت.', { parse_mode: 'Markdown', ...homeKeyboard() }));
 
 bot.command('codes', (ctx) => {
     const db = loadCodes();
