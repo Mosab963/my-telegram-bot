@@ -748,7 +748,7 @@ bot.action(/^method:(.+)$/, async (ctx) => {
     const discLine = discOk ? `\n🎟️ كود ${discOk.code}: خصم ${discOk.percent}%\n💰 السعر بعد الخصم: ${priceAfter}` : '';
     const codePart = discOk ? ':' + discOk.code : '';
     return showCustomer(ctx,
-        `💳 **صفحة الدفع - ${paymentMethodLabel(method)}**\n\n**${sec.title}**${priceLine}${discLine}\n\n${paymentMethodInfo(method)}\n\nادفع المبلغ المطلوب، وبعدها كبس "تأكيد الدفع".`,
+        `💳 **صفحة الدفع - ${paymentMethodLabel(method)}**\n\n**${sec.title}**${priceLine}${discLine}\n\n${paymentMethodInfo(method)}\n👆 كبس عالكود لتنسخو.\n\nادفع المبلغ المطلوب، وبعدها كبس "تأكيد الدفع".`,
         Markup.inlineKeyboard([
             [Markup.button.callback('💳 تأكيد الدفع', `pay:${sec.id}${codePart}:${method}`)],
             [Markup.button.callback('🔙 رجوع لطرق الدفع', `order:${sec.id}${codePart}`)],
