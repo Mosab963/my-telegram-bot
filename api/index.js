@@ -260,6 +260,19 @@ function paymentMethodInfo(method) {
     if (method === 'sham') return cfg.paymentSham || DEFAULT_PAYMENT.sham;
     return cfg.paymentBinance || DEFAULT_PAYMENT.binance;
 }
+// Tap-to-copy: inline `code` does not copy on every Telegram client, so the
+// payment code is rendered as a code BLOCK instead - every client copies a
+// block on tap (mobile) or shows a copy button on it (desktop). The admin may
+// save the code with or without backticks; the block is built either way.
+function paymentInfoForMethod(method) {
+    const info = paymentMethodInfo(method);
+    if (info.includes('`')) return info.replace(/`([^`]+)`/g, '```\n$1\n```');
+    return info.replace(/(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{6,}/, '```\n$&\n```');
+}
+function paymentInfoHtml(method) {
+    const info = paymentMethodInfo(method).replace(/`/g, '');
+    return escapeHtml(info).replace(/(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{6,}/, '<pre>$&</pre>');
+}
 function paymentMethodLabel(method) {
     return method === 'sham' ? '💵 شام كاش' : method === 'binance' ? '🟡 بينانس' : 'غير محددة';
 }
@@ -748,7 +761,7 @@ bot.action(/^method:(.+)$/, async (ctx) => {
     const discLine = discOk ? `\n🎟️ كود ${discOk.code}: خصم ${discOk.percent}%\n💰 السعر بعد الخصم: ${priceAfter}` : '';
     const codePart = discOk ? ':' + discOk.code : '';
     return showCustomer(ctx,
-        `💳 **صفحة الدفع - ${paymentMethodLabel(method)}**\n\n**${sec.title}**${priceLine}${discLine}\n\n${paymentMethodInfo(method)}\n👆 كبس عالكود لتنسخو.\n\nادفع المبلغ المطلوب، وبعدها كبس "تأكيد الدفع".`,
+        `💳 **صفحة الدفع - ${paymentMethodLabel(method)}**\n\n**${sec.title}**${priceLine}${discLine}\n\n${paymentInfoForMethod(method)}\n👆 كبس عالمربع لتنسخ الكود.\n\nادفع المبلغ المطلوب، وبعدها كبس "تأكيد الدفع".`,
         Markup.inlineKeyboard([
             [Markup.button.callback('💳 تأكيد الدفع', `pay:${sec.id}${codePart}:${method}`)],
             [Markup.button.callback('🔙 رجوع لطرق الدفع', `order:${sec.id}${codePart}`)],
@@ -1247,7 +1260,7 @@ bot.action('admin:set_cat', async (ctx) => {
 bot.action('admin:payment', async (ctx) => {
     if (!isAdmin(ctx)) return;
     await safeAnswer(ctx);
-    return showAdminView(ctx, `💳 <b>معلومات الدفع:</b>\n\n💵 <b>شام كاش:</b>\n${escapeHtml(paymentMethodInfo('sham'))}\n\n🟡 <b>بينانس:</b>\n${escapeHtml(paymentMethodInfo('binance'))}`, Markup.inlineKeyboard([
+    return showAdminView(ctx, `💳 <b>معلومات الدفع:</b>\n\n💵 <b>شام كاش:</b>\n${paymentInfoHtml('sham')}\n\n🟡 <b>بينانس:</b>\n${paymentInfoHtml('binance')}`, Markup.inlineKeyboard([
         [Markup.button.callback('✏️ تعديل شام كاش', 'admin:edit_payment:sham')],
         [Markup.button.callback('✏️ تعديل بينانس', 'admin:edit_payment:binance')],
         [Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]
