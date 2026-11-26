@@ -140,10 +140,20 @@ function loadUsers() { return loadJSON(USERS_FILE, { users: {} }); }
 function loadDiscounts() { return loadJSON(DISCOUNTS_FILE, { codes: [] }); }
 function loadViews() { return loadJSON(VIEWS_FILE, { views: {} }); }
 function saveViews(data) { saveJSON(VIEWS_FILE, data); }
-function getCustomerView(userId) { return (loadViews().views || {})[String(userId)] || null; }
-function setCustomerView(userId, messageId) {
+// The view is stored as { id, screen }: the message id plus which screen it
+// shows ('home', 'cat:<name>', or null for any other screen). The screen is
+// what lets the store refresh itself live when the admin changes services.
+function getCustomerView(userId) {
+    const v = (loadViews().views || {})[String(userId)];
+    return (v && typeof v === 'object') ? (v.id || null) : (v || null);
+}
+function getCustomerViewScreen(userId) {
+    const v = (loadViews().views || {})[String(userId)];
+    return (v && typeof v === 'object') ? (v.screen || null) : null;
+}
+function setCustomerView(userId, messageId, screen) {
     const d = loadViews();
-    if (messageId) d.views[String(userId)] = messageId;
+    if (messageId) d.views[String(userId)] = { id: messageId, screen: screen || null };
     else delete d.views[String(userId)];
     saveViews(d);
 }
@@ -162,46 +172,72 @@ async function deleteMsg(telegram, chatId, messageId) {
 // Show a customer step as the single message on screen: edit the current
 // view in place when the tapped button sits on it, otherwise delete the old
 // view and the stale message and send a fresh one. Mirrors the admin side.
-async function showCustomer(ctx, text, keyboard) {
+async function showCustomer(ctx, text, keyboard, screen) {
     const userId = String(ctx.from.id);
     const cbMsg = ctx.callbackQuery && ctx.callbackQuery.message;
     const viewId = getCustomerView(userId);
     if (cbMsg && viewId && cbMsg.message_id === viewId) {
-        try { await ctx.editMessageText(text, { parse_mode: 'Markdown', ...(keyboard || {}) }); return true; }
-        catch (e) { if (String(e && e.message || '').includes('message is not modified')) return true; }
+        try {
+            await ctx.editMessageText(text, { parse_mode: 'Markdown', ...(keyboard || {}) });
+            setCustomerView(userId, viewId, screen || null);
+            return true;
+        }
+        catch (e) { if (String(e && e.message || '').includes('message is not modified')) { setCustomerView(userId, viewId, screen || null); return true; } }
     }
     if (viewId && (!cbMsg || cbMsg.message_id !== viewId)) await deleteMsg(ctx.telegram, userId, viewId);
     if (cbMsg && cbMsg.message_id !== viewId) await deleteMsg(ctx.telegram, userId, cbMsg.message_id);
     try {
         const sent = await ctx.reply(text, { parse_mode: 'Markdown', ...(keyboard || {}) });
-        if (sent && sent.message_id) setCustomerView(userId, sent.message_id);
+        if (sent && sent.message_id) setCustomerView(userId, sent.message_id, screen || null);
         return true;
     } catch (e) {
-        try { const sent = await ctx.reply(text.replace(/[*_`]/g, ''), { ...(keyboard || {}) }); if (sent && sent.message_id) setCustomerView(userId, sent.message_id); return true; } catch (_) { return false; }
+        try { const sent = await ctx.reply(text.replace(/[*_`]/g, ''), { ...(keyboard || {}) }); if (sent && sent.message_id) setCustomerView(userId, sent.message_id, screen || null); return true; } catch (_) { return false; }
     }
 }
 // Reply to a plain customer message as the single view (prompts, confirmations).
-async function replyCustomer(ctx, text, extra, parseMode) {
+async function replyCustomer(ctx, text, extra, parseMode, screen) {
     const userId = String(ctx.from.id);
     const viewId = getCustomerView(userId);
     if (viewId) await deleteMsg(ctx.telegram, userId, viewId);
     try {
         const sent = await ctx.reply(text, { parse_mode: parseMode || 'Markdown', ...(extra || {}) });
-        if (sent && sent.message_id) setCustomerView(userId, sent.message_id);
+        if (sent && sent.message_id) setCustomerView(userId, sent.message_id, screen || null);
         return sent;
     } catch (e) {
-        try { const sent = await ctx.reply(text.replace(/[*_`]/g, ''), { ...(extra || {}) }); if (sent && sent.message_id) setCustomerView(userId, sent.message_id); return sent; } catch (_) { return null; }
+        try { const sent = await ctx.reply(text.replace(/[*_`]/g, ''), { ...(extra || {}) }); if (sent && sent.message_id) setCustomerView(userId, sent.message_id, screen || null); return sent; } catch (_) { return null; }
     }
 }
 // Send a proactive bot message to a customer as their single view.
-async function sendCustomerView(telegram, userId, text, extra, parseMode) {
+async function sendCustomerView(telegram, userId, text, extra, parseMode, screen) {
     const viewId = getCustomerView(userId);
     if (viewId) await deleteMsg(telegram, userId, viewId);
     try {
         const sent = await telegram.sendMessage(userId, text, { parse_mode: parseMode || 'Markdown', ...(extra || {}) });
-        if (sent && sent.message_id) setCustomerView(userId, sent.message_id);
+        if (sent && sent.message_id) setCustomerView(userId, sent.message_id, screen || null);
         return sent;
     } catch (e) { return null; }
+}
+// Refresh the store live for every customer who is currently looking at the
+// home screen or a category list, so a new service appears without them
+// pressing /start. Users in the middle of an order or a payment are never
+// touched: their view keeps its own screen.
+async function refreshStoreViews(telegram) {
+    const d = loadViews();
+    for (const [userId, v] of Object.entries(d.views || {})) {
+        const view = (v && typeof v === 'object') ? v : { id: v, screen: null };
+        if (!view.id) continue;
+        try {
+            if (view.screen === 'home') {
+                await telegram.editMessageText(userId, view.id, undefined, homeText(), { parse_mode: 'Markdown', ...homeKeyboard() });
+            } else if (typeof view.screen === 'string' && view.screen.startsWith('cat:')) {
+                const cat = view.screen.slice(4);
+                const { sections } = loadSections();
+                const list = sections.filter((s) => ((s.category || 'عام').trim() || 'عام') === cat);
+                if (!list.length) await telegram.editMessageText(userId, view.id, undefined, 'ما في خدمات بهالتصنيف بعد.', { parse_mode: 'Markdown', ...homeKeyboard() });
+                else await telegram.editMessageText(userId, view.id, undefined, `🗂️ **${cat}**\n\nاختار الخدمة:`, { parse_mode: 'Markdown', ...categoryKeyboard(cat) });
+            }
+        } catch (e) {}
+    }
 }
 function saveDiscounts(data) { saveJSON(DISCOUNTS_FILE, data); }
 // Apply a percentage discount to every number in a free-text price,
@@ -511,8 +547,8 @@ function homeText() {
 
 bot.catch((err) => console.error('Bot error:', err));
 
-bot.start(async (ctx) => { await replyCustomer(ctx, homeText(), homeKeyboard()); });
-bot.command('store', async (ctx) => { await replyCustomer(ctx, homeText(), homeKeyboard()); });
+bot.start(async (ctx) => { await replyCustomer(ctx, homeText(), homeKeyboard(), 'Markdown', 'home'); });
+bot.command('store', async (ctx) => { await replyCustomer(ctx, homeText(), homeKeyboard(), 'Markdown', 'home'); });
 bot.command('resetorders', (ctx) => {
     if (!isAdmin(ctx)) return;
     saveJSON(ORDERS_FILE, { orders: [] });
@@ -520,12 +556,12 @@ bot.command('resetorders', (ctx) => {
 });
 bot.command('cancel', async (ctx) => {
     if (isAdmin(ctx)) return ctx.reply('تم الإلغاء، رجعت للوحة التحكم.', { parse_mode: 'Markdown', ...adminKeyboard() });
-    await replyCustomer(ctx, 'تم الإلغاء، رجعت للقائمة الرئيسية.', homeKeyboard());
+    await replyCustomer(ctx, 'تم الإلغاء، رجعت للقائمة الرئيسية.', homeKeyboard(), 'Markdown', 'home');
 });
 bot.action('cancel', async (ctx) => {
     await safeAnswer(ctx, 'تم الإلغاء');
     if (isAdmin(ctx)) return showAdminView(ctx, adminText(), adminKeyboard());
-    return showCustomer(ctx, homeText(), homeKeyboard());
+    return showCustomer(ctx, homeText(), homeKeyboard(), 'home');
 });
 function adminPromptKeyboard() {
     return Markup.inlineKeyboard([
@@ -539,7 +575,7 @@ function cancelKeyboard() {
 
 // Single-message admin commands - no multi-step state, so Vercel cold starts cannot lose the step.
 // Format: /addservice الاسم | السعر | الوصف
-bot.command('addservice', (ctx) => {
+bot.command('addservice', async (ctx) => {
     if (!isAdmin(ctx)) return ctx.reply('هاد الأمر للأدمن بس.');
     const args = ctx.message.text.replace(/^\/addservice\s*/, '').trim();
     const parts = args.split('|').map((s) => s.trim());
@@ -547,19 +583,21 @@ bot.command('addservice', (ctx) => {
         return ctx.reply('الصيغة الصحيحة:\n`/addservice عرض 1 | 1$ | 5 صفحات إكسل`', { parse_mode: 'Markdown' });
     }
     const res = addOrUpdateService(parts[0], parts[1], parts.slice(2).join(' | '));
+    await refreshStoreViews(ctx.telegram);
     if (res.updated) return ctx.reply(`الخدمة "${parts[0]}" موجودة مسبقاً، حدثتها بدل ما تتكرر.`, { parse_mode: 'Markdown', ...adminKeyboard() });
     return ctx.reply(`تمت إضافة الخدمة "${parts[0]}" بسعر ${parts[1]} بنجاح.`, { parse_mode: 'Markdown', ...adminKeyboard() });
 });
-bot.command('delservice', (ctx) => {
+bot.command('delservice', async (ctx) => {
     if (!isAdmin(ctx)) return ctx.reply('هاد الأمر للأدمن بس.');
     const n = parseInt(ctx.message.text.replace(/^\/delservice\s*/, '').trim(), 10) - 1;
     const data = loadSections();
     if (isNaN(n) || !data.sections[n]) return ctx.reply('الصيغة: /delservice 1');
     const removed = data.sections.splice(n, 1)[0];
     saveJSON(SECTIONS_FILE, data);
+    await refreshStoreViews(ctx.telegram);
     return ctx.reply(`تم حذف الخدمة "${removed.title}".`, { parse_mode: 'Markdown', ...adminKeyboard() });
 });
-bot.command('setcat', (ctx) => {
+bot.command('setcat', async (ctx) => {
     if (!isAdmin(ctx)) return ctx.reply('هاد الأمر للأدمن بس.');
     const args = ctx.message.text.replace(/^\/setcat\s*/, '').trim();
     const parts = args.split('|').map((s) => s.trim());
@@ -568,9 +606,10 @@ bot.command('setcat', (ctx) => {
     if (isNaN(n) || !data.sections[n] || !parts[1]) return ctx.reply('الصيغة: /setcat 1 | حسابات');
     data.sections[n].category = parts[1];
     saveJSON(SECTIONS_FILE, data);
+    await refreshStoreViews(ctx.telegram);
     return ctx.reply(`تم تصنيف الخدمة "${data.sections[n].title}" تحت "${parts[1]}".`, { parse_mode: 'Markdown', ...adminKeyboard() });
 });
-bot.command('setprice', (ctx) => {
+bot.command('setprice', async (ctx) => {
     if (!isAdmin(ctx)) return ctx.reply('هاد الأمر للأدمن بس.');
     const args = ctx.message.text.replace(/^\/setprice\s*/, '').trim();
     const parts = args.split('|').map((s) => s.trim());
@@ -579,9 +618,10 @@ bot.command('setprice', (ctx) => {
     if (isNaN(n) || !data.sections[n] || !parts[1]) return ctx.reply('الصيغة: /setprice 1 | 2$');
     data.sections[n].price = parts[1];
     saveJSON(SECTIONS_FILE, data);
+    await refreshStoreViews(ctx.telegram);
     return ctx.reply('تم تعديل السعر.', { parse_mode: 'Markdown', ...adminKeyboard() });
 });
-bot.command('edittext', (ctx) => {
+bot.command('edittext', async (ctx) => {
     if (!isAdmin(ctx)) return ctx.reply('هاد الأمر للأدمن بس.');
     const args = ctx.message.text.replace(/^\/edittext\s*/, '').trim();
     const parts = args.split('|').map((s) => s.trim());
@@ -590,6 +630,7 @@ bot.command('edittext', (ctx) => {
     if (isNaN(n) || !data.sections[n] || !parts[1]) return ctx.reply('الصيغة: /edittext 1 | النص الجديد');
     data.sections[n].text = parts.slice(1).join(' | ');
     saveJSON(SECTIONS_FILE, data);
+    await refreshStoreViews(ctx.telegram);
     return ctx.reply('تم تعديل النص.', { parse_mode: 'Markdown', ...adminKeyboard() });
 });
 bot.command('setpayment', (ctx) => {
@@ -626,7 +667,7 @@ bot.action('myorders', async (ctx) => {
 
 bot.action('home', async (ctx) => {
     await safeAnswer(ctx);
-    return showCustomer(ctx, homeText(), homeKeyboard());
+    return showCustomer(ctx, homeText(), homeKeyboard(), 'home');
 });
 
 bot.action(/^cat:(.+)$/, async (ctx) => {
@@ -634,8 +675,8 @@ bot.action(/^cat:(.+)$/, async (ctx) => {
     await safeAnswer(ctx);
     const { sections } = loadSections();
     const list = sections.filter((s) => ((s.category || 'عام').trim() || 'عام') === cat);
-    if (!list.length) return showCustomer(ctx, 'ما في خدمات بهالتصنيف بعد.', homeKeyboard());
-    return showCustomer(ctx, `🗂️ **${cat}**\n\nاختار الخدمة:`, categoryKeyboard(cat));
+    if (!list.length) return showCustomer(ctx, 'ما في خدمات بهالتصنيف بعد.', homeKeyboard(), 'home');
+    return showCustomer(ctx, `🗂️ **${cat}**\n\nاختار الخدمة:`, categoryKeyboard(cat), 'cat:' + cat);
 });
 
 bot.action(/^section:(.+)$/, async (ctx) => {
@@ -643,7 +684,7 @@ bot.action(/^section:(.+)$/, async (ctx) => {
     const { sections } = loadSections();
     const sec = sections.find((s) => s.id === id);
     await safeAnswer(ctx);
-    if (!sec) return showCustomer(ctx, 'هاد القسم مو موجود.', homeKeyboard());
+    if (!sec) return showCustomer(ctx, 'هاد القسم مو موجود.', homeKeyboard(), 'home');
     const priceLine = sec.price ? `\n💰 السعر: ${sec.price}` : '';
     const rating = serviceRating(sec.id);
     const ratingLine = rating ? `\n⭐ التقييم: ${rating.avg} (${rating.count} تقييم)` : '';
@@ -660,7 +701,7 @@ bot.action(/^discount:(.+)$/, async (ctx) => {
     const { sections } = loadSections();
     const sec = sections.find((s) => s.id === id);
     await safeAnswer(ctx);
-    if (!sec) return showCustomer(ctx, 'هاد القسم مو موجود.', homeKeyboard());
+    if (!sec) return showCustomer(ctx, 'هاد القسم مو موجود.', homeKeyboard(), 'home');
     // The service id contains an underscore (sec_offer1), which breaks
     // Telegram Markdown parsing when bare, so it must be inside backticks.
     // Same class of bug as the pay prompt in PR #15.
@@ -675,7 +716,7 @@ bot.action(/^order:(.+)$/, async (ctx) => {
     const { sections } = loadSections();
     const sec = sections.find((s) => s.id === id);
     await safeAnswer(ctx);
-    if (!sec) return showCustomer(ctx, 'هاد القسم مو موجود.', homeKeyboard());
+    if (!sec) return showCustomer(ctx, 'هاد القسم مو موجود.', homeKeyboard(), 'home');
     const disc = findDiscount(code);
     const discOk = disc && discountApplies(disc, sec.id) ? disc : null;
     const priceAfter = discOk ? applyDiscount(sec.price || '', discOk.percent) : (sec.price || '');
@@ -1410,7 +1451,7 @@ bot.on('text', async (ctx, next) => {
         if (!name) return ctx.reply('ما لقيت اسم الخدمة، ابدأ من جديد بزر إضافة خدمة.');
         addOrUpdateService(name, text, desc);
         // backup only on demand now, to keep the bot fast
-
+        await refreshStoreViews(ctx.telegram);
         return ctx.reply(`تمت إضافة الخدمة "${name}" بسعر ${text} بنجاح.`, { parse_mode: 'Markdown', ...adminKeyboard() });
     }
     // Step 2: replying to the description prompt -> ask price, or finish if price included
@@ -1421,7 +1462,7 @@ bot.on('text', async (ctx, next) => {
         if (parts.length >= 2) {
             addOrUpdateService(name, parts[1], parts[0]);
             // backup only on demand now, to keep the bot fast
-
+            await refreshStoreViews(ctx.telegram);
             return ctx.reply(`تمت إضافة الخدمة "${name}" بسعر ${parts[1]} بنجاح.`, { parse_mode: 'Markdown', ...adminKeyboard() });
         }
         const price = priceFrom(text);
@@ -1429,7 +1470,7 @@ bot.on('text', async (ctx, next) => {
             const desc = text.replace(price, '').trim();
             addOrUpdateService(name, price, desc);
             // backup only on demand now, to keep the bot fast
-
+            await refreshStoreViews(ctx.telegram);
             return ctx.reply(`تمت إضافة الخدمة "${name}" بسعر ${price} بنجاح.`, { parse_mode: 'Markdown', ...adminKeyboard() });
         }
         return ctx.reply(`اسم الخدمة: ${name}\nالوصف: ${text}\n\nأرسل سعر الخدمة:\n\nاكتب /cancel للإلغاء.`, { parse_mode: 'Markdown', ...Markup.forceReply() });
@@ -1482,7 +1523,7 @@ bot.on('document', async (ctx) => {
         const res = await fetch(link.href);
         const json = await res.json();
         if (ctx.message.document.file_name.includes('services')) {
-            saveJSON(SECTIONS_FILE, json); return ctx.reply('تم استرجاع نسخة الخدمات.');
+            saveJSON(SECTIONS_FILE, json); await refreshStoreViews(ctx.telegram); return ctx.reply('تم استرجاع نسخة الخدمات.');
         }
         if (ctx.message.document.file_name.includes('orders')) {
             saveJSON(ORDERS_FILE, json); return ctx.reply('تم استرجاع نسخة الطلبات.');
