@@ -213,6 +213,35 @@ function applyDiscount(priceStr, percent) {
         return String(r).replace(/\.0$/, '').replace(/(\.\d)0$/, '$1');
     });
 }
+// Payment methods: each has its own payment info, so the order records
+// exactly how the customer paid and the admin can track the transfer.
+const DEFAULT_PAYMENT = {
+    sham: '💵 Sham Cash: `40ba4e3f2a3dc2a1759dbd26d21037c6`',
+    binance: '🟡 Binance UID: `481984372`'
+};
+function paymentMethodInfo(method) {
+    const cfg = loadConfig();
+    if (method === 'sham') return cfg.paymentSham || DEFAULT_PAYMENT.sham;
+    return cfg.paymentBinance || DEFAULT_PAYMENT.binance;
+}
+function paymentMethodLabel(method) {
+    return method === 'sham' ? '💵 شام كاش' : method === 'binance' ? '🟡 بينانس' : 'غير محددة';
+}
+function parsePayCallback(s) {
+    // pay:<id> | pay:<id>:<CODE> | pay:<id>:<CODE>:<method> | pay:<id>::<method>
+    const parts = String(s || '').split(':');
+    const id = parts[0] || '';
+    let code = '', method = '';
+    if (parts.length === 2) {
+        if (parts[1] === 'sham' || parts[1] === 'binance') method = parts[1];
+        else code = parts[1];
+    } else if (parts.length >= 3) {
+        code = parts[1] || '';
+        method = parts[2] || '';
+    }
+    return { id, code, method };
+}
+
 function findDiscount(code) {
     if (!code) return null;
     return loadDiscounts().codes.find((c) => String(c.code).toUpperCase() === String(code).toUpperCase().trim()) || null;
@@ -406,17 +435,19 @@ function orderDetailText(o) {
     const status = o.status === 'confirmed' ? '✅ مؤكد' : o.status === 'rejected' ? '❌ مرفوض' : o.status === 'awaiting_proof' ? '⏳ بانتظار إثبات الدفع' : o.status === 'expired' ? '🕐 ملغي (ما وصل إثبات دفع)' : '⏳ بانتظار التأكد من الدفع';
     const tx = o.txNumber ? `\nرقم المعاملة: <code>${escapeHtml(o.txNumber)}</code>` : '\nرقم المعاملة: لم يرسل بعد';
     const disc = o.discountCode ? `\n🎟️ كود خصم: <code>${escapeHtml(o.discountCode)}</code> (خصم ${o.discountPercent}%) - السعر قبل الخصم: ${escapeHtml(o.priceBefore || '')}` : '';
+    const methodLine = o.paymentMethod ? `\n💳 طريقة الدفع: ${paymentMethodLabel(o.paymentMethod)}` : '';
     const proof = o.proofPhoto ? '\n🖼️ إثبات الدفع: صورة مرفقة' : '';
     const rating = typeof o.rating === 'number' ? `\n⭐ التقييم: ${'⭐'.repeat(o.rating)} (${o.rating}/5)` : '';
     const time = o.createdAt ? `\nالوقت: ${new Date(o.createdAt).toLocaleString('ar-SY')}` : '';
-    return `🧾 <b>تفاصيل الطلب</b>\n\nرقم الطلب: <code>${o.id}</code>\nالخدمة: ${escapeHtml(o.serviceTitle)}\nالسعر: ${escapeHtml(o.price || '-')}${disc}${tx}${proof}${rating}\n${customerLine(o)}${time}\nالحالة: ${status}`;
+    return `🧾 <b>تفاصيل الطلب</b>\n\nرقم الطلب: <code>${o.id}</code>\nالخدمة: ${escapeHtml(o.serviceTitle)}\nالسعر: ${escapeHtml(o.price || '-')}${disc}${methodLine}${tx}${proof}${rating}\n${customerLine(o)}${time}\nالحالة: ${status}`;
 }
 
 function orderNotifyText(o, extra) {
     const tx = o.txNumber ? `\nرقم المعاملة: <code>${escapeHtml(o.txNumber)}</code>` : '';
     const disc = o.discountCode ? `\n🎟️ كود خصم: <code>${escapeHtml(o.discountCode)}</code> (خصم ${o.discountPercent}%)` : '';
+    const methodLine = o.paymentMethod ? `\n💳 طريقة الدفع: ${paymentMethodLabel(o.paymentMethod)}` : '';
     const time = o.createdAt ? `\nالوقت: ${new Date(o.createdAt).toLocaleString('ar-SY')}` : '';
-    return `🧾 <b>طلب جديد قيد التنفيذ</b>\n\nرقم الطلب: <code>${o.id}</code>\nالخدمة: ${escapeHtml(o.serviceTitle)}\nالسعر: ${escapeHtml(o.price || '-')}${disc}${tx}\n${customerLine(o)}${time}\nالحالة: بانتظار التأكد من الدفع${extra || ''}`;
+    return `🧾 <b>طلب جديد قيد التنفيذ</b>\n\nرقم الطلب: <code>${o.id}</code>\nالخدمة: ${escapeHtml(o.serviceTitle)}\nالسعر: ${escapeHtml(o.price || '-')}${disc}${methodLine}${tx}\n${customerLine(o)}${time}\nالحالة: بانتظار التأكد من الدفع${extra || ''}`;
 }
 
 function isAdmin(ctx) { return ADMIN_ID && String(ctx.from.id) === ADMIN_ID; }
@@ -564,9 +595,12 @@ bot.command('edittext', (ctx) => {
 bot.command('setpayment', (ctx) => {
     if (!isAdmin(ctx)) return ctx.reply('هاد الأمر للأدمن بس.');
     const args = ctx.message.text.replace(/^\/setpayment\s*/, '').trim();
-    if (!args) return ctx.reply('الصيغة: /setpayment معلومات الدفع الجديدة');
+    const parts = args.split('|').map((s) => s.trim());
+    const method = (parts[0] || '').toLowerCase();
+    if ((method !== 'sham' && method !== 'binance') || !parts[1]) return ctx.reply('الصيغة: /setpayment sham | معلومات الدفع الجديدة\nأو: /setpayment binance | معلومات الدفع الجديدة');
     const cfg = loadConfig();
-    cfg.paymentInfo = args;
+    if (method === 'sham') cfg.paymentSham = parts.slice(1).join(' | ');
+    else cfg.paymentBinance = parts.slice(1).join(' | ');
     saveJSON(CONFIG_FILE, cfg);
     return ctx.reply('تم تعديل معلومات الدفع.', { parse_mode: 'Markdown', ...adminKeyboard() });
 });
@@ -642,24 +676,50 @@ bot.action(/^order:(.+)$/, async (ctx) => {
     const sec = sections.find((s) => s.id === id);
     await safeAnswer(ctx);
     if (!sec) return showCustomer(ctx, 'هاد القسم مو موجود.', homeKeyboard());
-    const cfg = loadConfig();
     const disc = findDiscount(code);
     const discOk = disc && discountApplies(disc, sec.id) ? disc : null;
     const priceAfter = discOk ? applyDiscount(sec.price || '', discOk.percent) : (sec.price || '');
     const priceLine = sec.price ? `\n💰 السعر: ${sec.price}` : '';
     const discLine = discOk ? `\n🎟️ كود ${discOk.code}: خصم ${discOk.percent}%\n💰 السعر بعد الخصم: ${priceAfter}` : '';
+    const codePart = discOk ? ':' + discOk.code : '';
     return showCustomer(ctx,
-        `💳 **صفحة الدفع**\n\n**${sec.title}**${priceLine}${discLine}\n\n${cfg.paymentInfo}`,
+        `💳 **صفحة الدفع**\n\n**${sec.title}**${priceLine}${discLine}\n\nاختر طريقة الدفع:`,
         Markup.inlineKeyboard([
-            [Markup.button.callback('💳 تأكيد الدفع', `pay:${sec.id}${discOk ? ':' + discOk.code : ''}`)],
+            [Markup.button.callback('💵 شام كاش', `method:${sec.id}${codePart}:sham`)],
+            [Markup.button.callback('🟡 بينانس', `method:${sec.id}${codePart}:binance`)],
+            [Markup.button.callback('❌ إلغاء', 'home')]
+        ]));
+});
+
+bot.action(/^method:(.+)$/, async (ctx) => {
+    const parsed = parsePayCallback(ctx.match[1]);
+    const id = parsed.id;
+    const code = parsed.code;
+    const method = parsed.method;
+    const { sections } = loadSections();
+    const sec = sections.find((s) => s.id === id);
+    await safeAnswer(ctx);
+    if (!sec || (method !== 'sham' && method !== 'binance')) return showCustomer(ctx, 'طريقة الدفع مو موجودة.', homeKeyboard());
+    const disc = findDiscount(code);
+    const discOk = disc && discountApplies(disc, sec.id) ? disc : null;
+    const priceAfter = discOk ? applyDiscount(sec.price || '', discOk.percent) : (sec.price || '');
+    const priceLine = sec.price ? `\n💰 السعر: ${sec.price}` : '';
+    const discLine = discOk ? `\n🎟️ كود ${discOk.code}: خصم ${discOk.percent}%\n💰 السعر بعد الخصم: ${priceAfter}` : '';
+    const codePart = discOk ? ':' + discOk.code : '';
+    return showCustomer(ctx,
+        `💳 **صفحة الدفع - ${paymentMethodLabel(method)}**\n\n**${sec.title}**${priceLine}${discLine}\n\n${paymentMethodInfo(method)}\n\nادفع المبلغ المطلوب، وبعدها كبس "تأكيد الدفع".`,
+        Markup.inlineKeyboard([
+            [Markup.button.callback('💳 تأكيد الدفع', `pay:${sec.id}${codePart}:${method}`)],
+            [Markup.button.callback('🔙 رجوع لطرق الدفع', `order:${sec.id}${codePart}`)],
             [Markup.button.callback('❌ إلغاء', 'home')]
         ]));
 });
 
 bot.action(/^pay:(.+)$/, async (ctx) => {
-    const payParts = ctx.match[1].split(':');
-    const id = payParts[0];
-    const payCode = payParts[1] || '';
+    const parsed = parsePayCallback(ctx.match[1]);
+    const id = parsed.id;
+    const payCode = parsed.code;
+    const payMethod = parsed.method;
     const { sections } = loadSections();
     const sec = sections.find((s) => s.id === id);
     await safeAnswer(ctx, 'أرسل إثبات الدفع');
@@ -676,6 +736,7 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
         price: payDisc ? applyDiscount(sec.price || '', payDisc.percent) : (sec.price || ''),
         priceBefore: payDisc ? (sec.price || '') : '',
         discountCode: payDisc ? payDisc.code : '', discountPercent: payDisc ? payDisc.percent : 0,
+        paymentMethod: payMethod || '',
         userId: String(ctx.from.id), username: ctx.from.username || '',
         name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' '),
         status: 'awaiting_proof', txNumber: '', createdAt: new Date().toISOString()
@@ -834,6 +895,7 @@ function adminKeyboard() {
         [Markup.button.callback('🗂️ تصنيف خدمة', 'admin:set_cat')],
         [Markup.button.callback('🎟️ أكواد الخصم', 'admin:discounts')],
         [Markup.button.callback('📣 بث إعلاني', 'admin:broadcast')],
+        [Markup.button.callback('💳 معلومات الدفع', 'admin:payment')],
         [Markup.button.callback('🧾 عرض الطلبات', 'admin:orders')],
         [Markup.button.callback('⏳ طلبات غير مكتملة', 'admin:incomplete')],
         [Markup.button.callback('📦 أرشيف الطلبات', 'admin:archive')],
@@ -1141,6 +1203,22 @@ bot.action('admin:set_cat', async (ctx) => {
     return showAdminView(ctx, '🗂️ <b>تصنيف خدمة</b>\n\nأرسل أمر واحد بهالشكل:\n<code>/setcat 1 | حسابات</code>\n\nالخدمات:\n' + list, adminPromptKeyboard());
 });
 
+bot.action('admin:payment', async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    await safeAnswer(ctx);
+    return showAdminView(ctx, `💳 <b>معلومات الدفع:</b>\n\n💵 <b>شام كاش:</b>\n${escapeHtml(paymentMethodInfo('sham'))}\n\n🟡 <b>بينانس:</b>\n${escapeHtml(paymentMethodInfo('binance'))}`, Markup.inlineKeyboard([
+        [Markup.button.callback('✏️ تعديل شام كاش', 'admin:edit_payment:sham')],
+        [Markup.button.callback('✏️ تعديل بينانس', 'admin:edit_payment:binance')],
+        [Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]
+    ]));
+});
+bot.action(/^admin:edit_payment:(sham|binance)$/, async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const method = ctx.match[1];
+    await safeAnswer(ctx);
+    return ctx.reply(`💳 <b>تعديل معلومات الدفع - ${paymentMethodLabel(method)}</b>\n\nالحالية:\n${escapeHtml(paymentMethodInfo(method))}\n\nأرسل معلومات الدفع الجديدة لـ ${method === 'sham' ? 'شام كاش' : 'بينانس'}:\n\nاكتب /cancel للإلغاء.`, { parse_mode: 'HTML', ...Markup.forceReply() });
+});
+
 bot.action('admin:set_payment', async (ctx) => {
     if (!isAdmin(ctx)) return;
     await safeAnswer(ctx);
@@ -1291,6 +1369,15 @@ bot.on('text', async (ctx, next) => {
         } catch (e) {
             return ctx.reply('ما قدرت ابعت الرسالة للزبون، يمكن حظر البوت أو ما فتح المحادثة معه بعد.');
         }
+    }
+    // Replying to the edit-payment prompt -> save the method info
+    if (replied.includes('أرسل معلومات الدفع الجديدة لـ')) {
+        const method = replied.includes('شام كاش') ? 'sham' : 'binance';
+        const cfg = loadConfig();
+        if (method === 'sham') cfg.paymentSham = text;
+        else cfg.paymentBinance = text;
+        saveJSON(CONFIG_FILE, cfg);
+        return ctx.reply('تم تعديل معلومات الدفع.', { parse_mode: 'Markdown', ...adminKeyboard() });
     }
     // Replying to the add-code prompt -> create the discount code
     if (replied.includes('أرسل الكود والنسبة')) {
