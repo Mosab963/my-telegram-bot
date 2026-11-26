@@ -15,7 +15,30 @@ Telegram.prototype.sendMessage = async function (chatId, text, extra) {
 };
 // Record every incoming customer message id (plain messages and the
 // message a pressed button sits on).
+// Orders waiting for payment proof expire after 24h: they are marked
+// expired and the customer is told, so incomplete orders never pile up.
+// Checked at most once an hour.
+const PROOF_TTL_MS = 24 * 60 * 60 * 1000;
+async function expireAwaitingProofOrders(telegram) {
+    const cfg = loadConfig();
+    const now = Date.now();
+    if (cfg.lastProofExpiryCheck && now - cfg.lastProofExpiryCheck < 60 * 60 * 1000) return;
+    cfg.lastProofExpiryCheck = now;
+    saveJSON(CONFIG_FILE, cfg);
+    const data = loadOrders();
+    let changed = false;
+    for (const o of data.orders) {
+        if (o.status === 'awaiting_proof' && now - new Date(o.createdAt || 0).getTime() > PROOF_TTL_MS) {
+            o.status = 'expired';
+            changed = true;
+            try { await sendCustomerView(telegram, o.userId, `🕐 تم إلغاء طلبك: ${o.serviceTitle}\n\nلأنو ما وصلنا إثبات الدفع خلال 24 ساعة. إذا لسه بدك الخدمة، اطلب من جديد.`, homeKeyboard()); } catch (e) {}
+        }
+    }
+    if (changed) saveJSON(ORDERS_FILE, data);
+}
+
 bot.use(async (ctx, next) => {
+    try { await expireAwaitingProofOrders(ctx.telegram); } catch (e) {}
     try {
         if (ctx.from && !isAdmin(ctx)) {
             const m = ctx.message || (ctx.callbackQuery && ctx.callbackQuery.message);
@@ -380,7 +403,7 @@ function orderDetailKeyboard(o, from) {
     return Markup.inlineKeyboard(rows);
 }
 function orderDetailText(o) {
-    const status = o.status === 'confirmed' ? '✅ مؤكد' : o.status === 'rejected' ? '❌ مرفوض' : '⏳ بانتظار التأكد من الدفع';
+    const status = o.status === 'confirmed' ? '✅ مؤكد' : o.status === 'rejected' ? '❌ مرفوض' : o.status === 'awaiting_proof' ? '⏳ بانتظار إثبات الدفع' : o.status === 'expired' ? '🕐 ملغي (ما وصل إثبات دفع)' : '⏳ بانتظار التأكد من الدفع';
     const tx = o.txNumber ? `\nرقم المعاملة: <code>${escapeHtml(o.txNumber)}</code>` : '\nرقم المعاملة: لم يرسل بعد';
     const disc = o.discountCode ? `\n🎟️ كود خصم: <code>${escapeHtml(o.discountCode)}</code> (خصم ${o.discountPercent}%) - السعر قبل الخصم: ${escapeHtml(o.priceBefore || '')}` : '';
     const proof = o.proofPhoto ? '\n🖼️ إثبات الدفع: صورة مرفقة' : '';
@@ -553,7 +576,7 @@ bot.command('myorders', (ctx) => {
     const { orders } = loadOrders();
     const mine = orders.filter((o) => o.userId === String(ctx.from.id));
     if (!mine.length) return replyCustomer(ctx, 'لسه ما عندك طلبات.', homeKeyboard());
-    const list = mine.slice(-10).map((o) => `• ${o.serviceTitle} - ${o.price || ''} - ${o.status === 'pending' ? 'قيد التنفيذ، بانتظار التأكد من الدفع' : o.status === 'confirmed' ? 'تم تأكيد الدفع' : 'مرفوض'}`).join('\n');
+    const list = mine.slice(-10).map((o) => `• ${o.serviceTitle} - ${o.price || ''} - ${o.status === 'awaiting_proof' ? 'بانتظار إثبات الدفع، أرسل رقم المعاملة أو صورة الإيصال' : o.status === 'expired' ? 'ملغي (ما وصل إثبات دفع)' : o.status === 'awaiting_proof' ? 'بانتظار إثبات الدفع، أرسل رقم المعاملة أو صورة الإيصال' : o.status === 'expired' ? 'ملغي (ما وصل إثبات دفع)' : o.status === 'pending' ? 'قيد التنفيذ، بانتظار التأكد من الدفع' : o.status === 'confirmed' ? 'تم تأكيد الدفع' : 'مرفوض'}`).join('\n');
     return replyCustomer(ctx, '📦 **طلباتي:**\n\n' + list, homeKeyboard());
 });
 
@@ -639,13 +662,13 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
     const payCode = payParts[1] || '';
     const { sections } = loadSections();
     const sec = sections.find((s) => s.id === id);
-    await safeAnswer(ctx, 'أرسل رقم المعاملة');
+    await safeAnswer(ctx, 'أرسل إثبات الدفع');
     if (!sec) return safeEdit(ctx, 'هاد القسم مو موجود.', homeKeyboard());
-    // Reset: drop this user's stale pending orders without a tx number,
-    // then create ONE fresh order and finish the flow right here. The
-    // transaction number is optional afterwards, not a blocker.
+    // Reset: drop this user's stale orders that never got payment proof,
+    // then create ONE fresh order. The order is only complete once the
+    // customer sends a transaction number or a payment screenshot.
     const ordersData = loadOrders();
-    ordersData.orders = ordersData.orders.filter((o) => !(o.userId === String(ctx.from.id) && o.status === 'pending' && !o.txNumber));
+    ordersData.orders = ordersData.orders.filter((o) => !(o.userId === String(ctx.from.id) && o.status === 'awaiting_proof'));
     const payDiscRaw = findDiscount(payCode);
     const payDisc = payDiscRaw && discountApplies(payDiscRaw, sec.id) ? payDiscRaw : null;
     const order = {
@@ -655,7 +678,7 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
         discountCode: payDisc ? payDisc.code : '', discountPercent: payDisc ? payDisc.percent : 0,
         userId: String(ctx.from.id), username: ctx.from.username || '',
         name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' '),
-        status: 'pending', txNumber: '', createdAt: new Date().toISOString()
+        status: 'awaiting_proof', txNumber: '', createdAt: new Date().toISOString()
     };
     if (payDisc) {
         const ddata = loadDiscounts();
@@ -665,16 +688,12 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
     ordersData.orders.push(order);
     saveJSON(ORDERS_FILE, ordersData);
     const orderId = order.id;
-    if (ADMIN_ID) {
-        try {
-            await ctx.telegram.sendMessage(ADMIN_ID, orderNotifyText(order),
-                { parse_mode: 'HTML', ...orderActionKeyboard(order) });
-        } catch (e) { console.error('Admin notify failed:', e && e.message); }
-    }
+    // The admin is NOT notified yet: the order only reaches him once the
+    // customer sends payment proof (transaction number or screenshot).
     // The payment message is the current view: edit it in place to ask for
-    // the transaction number (or replace it if the button sat on a stale one).
+    // the proof (or replace it if the button sat on a stale one).
     return showCustomer(ctx,
-        `⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${sec.title}\nالسعر: ${sec.price || ''}\nرقم الطلب: \`${orderId}\`\n\nإذا بدك، أرسل رقم المعاملة أو صورة إيصال الدفع:`,
+        `⏳ **طلبك بانتظار إثبات الدفع.**\n\nالخدمة: ${sec.title}\nالسعر: ${sec.price || ''}\nرقم الطلب: \`${orderId}\`\n\nأرسل رقم المعاملة أو صورة إيصال الدفع لإكمال طلبك:`,
         Markup.inlineKeyboard([
             [Markup.button.callback('❌ إلغاء الطلب', 'cancel')]
         ]));
@@ -816,6 +835,7 @@ function adminKeyboard() {
         [Markup.button.callback('🎟️ أكواد الخصم', 'admin:discounts')],
         [Markup.button.callback('📣 بث إعلاني', 'admin:broadcast')],
         [Markup.button.callback('🧾 عرض الطلبات', 'admin:orders')],
+        [Markup.button.callback('⏳ طلبات غير مكتملة', 'admin:incomplete')],
         [Markup.button.callback('📦 أرشيف الطلبات', 'admin:archive')],
         [Markup.button.callback('👥 المستخدمين', 'admin:users')],
         [Markup.button.callback('💳 تعديل معلومات الدفع', 'admin:set_payment')],
@@ -893,6 +913,19 @@ bot.action('admin:orders', async (ctx) => {
     rows.push([Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]);
     return showAdminView(ctx, '🧾 <b>الطلبات بانتظار التأكد:</b>\n\n' + list + '\n\nكبس على رقم الطلب مشان تفتح تفاصيلو وتديره.', Markup.inlineKeyboard(rows));
 });
+bot.action('admin:incomplete', async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    await safeAnswer(ctx);
+    await expireAwaitingProofOrders(ctx.telegram);
+    const { orders } = loadOrders();
+    const waiting = orders.filter((o) => o.status === 'awaiting_proof').slice(-20);
+    if (!waiting.length) return showAdminView(ctx, 'ما في طلبات غير مكتملة، كل الطلبات وصلها إثبات دفع أو تلغت.', adminKeyboard());
+    const list = waiting.map((o, i) => `${i + 1}. ${escapeHtml(o.serviceTitle)} - ${escapeHtml(o.price || '')} - من ${new Date(o.createdAt).toLocaleString('ar-SY')}\n   ${customerLine(o).replace(/\n/g, ' | ')}`).join('\n\n');
+    const rows = waiting.map((o, i) => [Markup.button.callback(`${i + 1}. ${o.serviceTitle}`, `admin:order:${o.id}`)]);
+    rows.push([Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]);
+    return showAdminView(ctx, '⏳ <b>طلبات غير مكتملة (بانتظار إثبات الدفع):</b>\n\n' + list + '\n\nهالطلبات لسه ما وصلها رقم معاملة ولا صورة إيصال، وبتتلغى لحالها بعد 24 ساعة.', Markup.inlineKeyboard(rows));
+});
+
 bot.action('admin:archive', async (ctx) => {
     if (!isAdmin(ctx)) return;
     const { orders } = loadOrders();
@@ -944,7 +977,7 @@ bot.action(/^admin:user:(.+)$/, async (ctx) => {
     const u = users[userId];
     if (!u) return showAdminView(ctx, 'المستخدم مو موجود.', adminKeyboard());
     const myOrders = loadOrders().orders.filter((o) => o.userId === userId);
-    const ordersList = myOrders.length ? myOrders.map((o, i) => `${i + 1}. ${escapeHtml(o.serviceTitle)} - ${o.price || ''} - ${o.status === 'confirmed' ? '✅ مؤكد' : o.status === 'rejected' ? '❌ مرفوض' : '⏳ بانتظار التأكد'}`).join('\n') : 'ما عندو طلبات بعد.';
+    const ordersList = myOrders.length ? myOrders.map((o, i) => `${i + 1}. ${escapeHtml(o.serviceTitle)} - ${o.price || ''} - ${o.status === 'confirmed' ? '✅ مؤكد' : o.status === 'rejected' ? '❌ مرفوض' : o.status === 'awaiting_proof' ? '⏳ بانتظار إثبات الدفع' : o.status === 'expired' ? '🕐 ملغي' : '⏳ بانتظار التأكد'}`).join('\n') : 'ما عندو طلبات بعد.';
     const rows = myOrders.map((o, i) => [Markup.button.callback(`${i + 1}. ${escapeHtml(o.serviceTitle)}`, `admin:order:${o.id}`)]);
     rows.push([Markup.button.callback('🗑️ مسح محادثة المستخدم', `clearuser:${userId}`)]);
     rows.push([Markup.button.callback('🔙 رجوع للمستخدمين', 'admin:users')]);
@@ -1124,7 +1157,8 @@ bot.action('admin:stats', async (ctx) => {
     const newToday = users.filter((u) => (u.firstSeen || '').slice(0, 10) === today).length;
     const confirmedCount = orders.filter((o) => o.status === 'confirmed').length;
     const rejectedCount = orders.filter((o) => o.status === 'rejected').length;
-    return showAdminView(ctx, `📊 <b>إحصائيات شاملة:</b>\n\n👥 <b>المستخدمون:</b> ${users.length} (جدد اليوم: ${newToday})\n🧾 <b>الطلبات:</b> ${orders.length}\n⏳ بانتظار التأكد: ${pendingCount}\n✅ مكتملة (مؤكدة): ${confirmedCount}\n❌ مرفوضة: ${rejectedCount}\n📋 <b>الخدمات:</b> ${sections}`, adminKeyboard());
+    const awaitingCount = orders.filter((o) => o.status === 'awaiting_proof').length;
+    return showAdminView(ctx, `📊 <b>إحصائيات شاملة:</b>\n\n👥 <b>المستخدمون:</b> ${users.length} (جدد اليوم: ${newToday})\n🧾 <b>الطلبات:</b> ${orders.length}\n⏳ بانتظار إثبات الدفع: ${awaitingCount}\n⏳ بانتظار التأكد: ${pendingCount}\n✅ مكتملة (مؤكدة): ${confirmedCount}\n❌ مرفوضة: ${rejectedCount}\n📋 <b>الخدمات:</b> ${sections}`, adminKeyboard());
 });
 bot.action('admin:backup', async (ctx) => {
     if (!isAdmin(ctx)) return;
@@ -1175,32 +1209,38 @@ bot.on('text', async (ctx, next) => {
         // (this is the common case - the user just types the number, without replying)
         if (!serviceId) {
             const ordersData = loadOrders();
-            let pendingOrder = ordersData.orders.filter((o) => o.userId === String(ctx.from.id) && o.status === 'pending' && !o.txNumber).slice(-1)[0];
+            const uid = String(ctx.from.id);
+            // Payment proof completes the order: prefer an order waiting for
+            // proof, then (for orders made before this change) a pending one
+            // without a transaction number.
+            let pendingOrder = ordersData.orders.filter((o) => o.userId === uid && o.status === 'awaiting_proof').slice(-1)[0]
+                || ordersData.orders.filter((o) => o.userId === uid && o.status === 'pending' && !o.txNumber).slice(-1)[0];
             // Forgiving fallback: the transaction number was sometimes sent
             // from a different account/device than the one that clicked
-            // Confirm Payment. If this sender has no pending order, but
-            // there is a single recent pending order without a tx number
-            // (last 30 minutes), attach the number to it instead of
-            // leaving the user stuck. The admin is told the sender id.
+            // Confirm Payment. If this sender has no order waiting for proof,
+            // but there is a recent one (last 30 minutes), attach the number
+            // to it instead of leaving the user stuck. The admin is told the
+            // sender id.
             let senderMismatch = false;
             if (!pendingOrder) {
-                const recent = ordersData.orders.filter((o) => o.status === 'pending' && !o.txNumber && Date.now() - new Date(o.createdAt || 0).getTime() < 30 * 60 * 1000);
+                const recent = ordersData.orders.filter((o) => (o.status === 'awaiting_proof' || (o.status === 'pending' && !o.txNumber)) && Date.now() - new Date(o.createdAt || 0).getTime() < 30 * 60 * 1000);
                 if (recent.length) { pendingOrder = recent.slice(-1)[0]; senderMismatch = true; }
             }
             if (pendingOrder && /^[A-Za-z0-9_-]{3,}$/.test(text)) {
+                const wasAwaiting = pendingOrder.status === 'awaiting_proof';
                 pendingOrder.txNumber = text;
+                if (wasAwaiting) pendingOrder.status = 'pending';
                 saveJSON(ORDERS_FILE, ordersData);
                 if (ADMIN_ID) {
                     try {
                         await ctx.telegram.sendMessage(ADMIN_ID,
-                            `🧾 **طلب جديد قيد التنفيذ**\n\nرقم الطلب: \`${pendingOrder.id}\`\nالخدمة: ${pendingOrder.serviceTitle}\nالسعر: ${pendingOrder.price || '-'}\nرقم المعاملة: \`${text}\`\nالزبون: ${pendingOrder.name} (@${pendingOrder.username || 'بدون معرف'})\nآيدي الزبون: \`${pendingOrder.userId}\`${senderMismatch ? `\nتنبيه: رقم المعاملة انبعت من حساب تاني، آيدي المرسل: \`${ctx.from.id}\`` : ''}\nالحالة: بانتظار التأكد من الدفع`,
-                            { parse_mode: 'Markdown', ...Markup.inlineKeyboard([
-                                [Markup.button.callback('✅ تأكيد الدفع واستلام الطلب', `approve:${pendingOrder.id}`)],
-                                [Markup.button.callback('❌ رفض الطلب', `reject:${pendingOrder.id}`)]
-                            ]) });
+                            orderNotifyText(pendingOrder, senderMismatch ? `\nتنبيه: رقم المعاملة انبعت من حساب تاني، آيدي المرسل: <code>${ctx.from.id}</code>` : ''),
+                            { parse_mode: 'HTML', ...orderActionKeyboard(pendingOrder) });
                     } catch (e) {}
                 }
-                return replyCustomer(ctx, `⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${pendingOrder.serviceTitle}\nرقم الطلب: \`${pendingOrder.id}\`\nرقم المعاملة: \`${text}\`\n\nرح نبلغك بس نتأكد من الدفع.`, homeKeyboard());
+                return replyCustomer(ctx, wasAwaiting
+                    ? `✅ **تم استلام إثبات الدفع، طلبك صار قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${pendingOrder.serviceTitle}\nرقم الطلب: \`${pendingOrder.id}\`\nرقم المعاملة: \`${text}\`\n\nرح نبلغك بس نتأكد من الدفع.`
+                    : `⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${pendingOrder.serviceTitle}\nرقم الطلب: \`${pendingOrder.id}\`\nرقم المعاملة: \`${text}\`\n\nرح نبلغك بس نتأكد من الدفع.`, homeKeyboard());
             }
             // Only customers with an order can message the admin. Anyone else
             // gets a polite reply pointing them to order first, and nothing
@@ -1229,12 +1269,7 @@ bot.on('text', async (ctx, next) => {
         saveJSON(ORDERS_FILE, ordersData);
         if (ADMIN_ID) {
             try {
-                await ctx.telegram.sendMessage(ADMIN_ID,
-                    `🧾 **طلب جديد قيد التنفيذ**\n\nرقم الطلب: \`${orderId}\`\nالخدمة: ${sec.title}\nالسعر: ${sec.price || '-'}\nرقم المعاملة: \`${text}\`\nالزبون: ${order.name} (@${order.username || 'بدون معرف'})\nآيدي الزبون: \`${order.userId}\`\nالحالة: بانتظار التأكد من الدفع`,
-                    { parse_mode: 'Markdown', ...Markup.inlineKeyboard([
-                        [Markup.button.callback('✅ تأكيد الدفع واستلام الطلب', `approve:${orderId}`)],
-                        [Markup.button.callback('❌ رفض الطلب', `reject:${orderId}`)]
-                    ]) });
+                await ctx.telegram.sendMessage(ADMIN_ID, orderNotifyText(order), { parse_mode: 'HTML', ...orderActionKeyboard(order) });
             } catch (e) { console.error('Admin notify failed:', e.message); }
         }
         return replyCustomer(ctx, `⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${sec.title}\nرقم الطلب: \`${orderId}\`\nرقم المعاملة: \`${text}\`\n\nرح نبلغك بس نتأكد من الدفع.`, homeKeyboard());
@@ -1323,21 +1358,24 @@ bot.on('photo', async (ctx) => {
     const fileId = photos[photos.length - 1].file_id;
     const ordersData = loadOrders();
     const uid = String(ctx.from.id);
-    let order = ordersData.orders.filter((o) => o.userId === uid && o.status === 'pending' && !o.proofPhoto).slice(-1)[0]
+    let order = ordersData.orders.filter((o) => o.userId === uid && o.status === 'awaiting_proof').slice(-1)[0]
+        || ordersData.orders.filter((o) => o.userId === uid && o.status === 'pending' && !o.proofPhoto).slice(-1)[0]
         || ordersData.orders.filter((o) => o.userId === uid && o.status === 'pending').slice(-1)[0];
     if (!order) {
-        const recent = ordersData.orders.filter((o) => o.status === 'pending' && !o.proofPhoto && Date.now() - new Date(o.createdAt || 0).getTime() < 30 * 60 * 1000);
+        const recent = ordersData.orders.filter((o) => (o.status === 'awaiting_proof' || (o.status === 'pending' && !o.proofPhoto)) && Date.now() - new Date(o.createdAt || 0).getTime() < 30 * 60 * 1000);
         if (recent.length) order = recent.slice(-1)[0];
     }
     if (order) {
+        const wasAwaiting = order.status === 'awaiting_proof';
         order.proofPhoto = fileId;
+        if (wasAwaiting) order.status = 'pending';
         saveJSON(ORDERS_FILE, ordersData);
         if (ADMIN_ID) {
             try {
                 await ctx.telegram.sendPhoto(ADMIN_ID, fileId, { caption: orderNotifyText(order) + '\n\n🖼️ إثبات دفع مرفق', parse_mode: 'HTML', ...orderActionKeyboard(order) });
             } catch (e) { console.error('Proof notify failed:', e.message); }
         }
-        return replyCustomer(ctx, 'تم استلام إثبات الدفع، رح نتأكد منو ونبلغك.', homeKeyboard());
+        return replyCustomer(ctx, wasAwaiting ? '✅ تم استلام إثبات الدفع، طلبك صار قيد التنفيذ ريثما يتم التأكد من الدفع.' : 'تم استلام إثبات الدفع، رح نتأكد منو ونبلغك.', homeKeyboard());
     }
     const hasOrder = ordersData.orders.some((o) => o.userId === uid);
     if (!hasOrder) {
