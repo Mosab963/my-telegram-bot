@@ -56,6 +56,7 @@ const CODES_FILE = path.join(DATA_DIR, 'store-codes.json');
 const CHATS_FILE = path.join(DATA_DIR, 'store-chats.json');
 const USERS_FILE = path.join(DATA_DIR, 'store-users.json');
 const DISCOUNTS_FILE = path.join(DATA_DIR, 'store-discounts.json');
+const VIEWS_FILE = path.join(DATA_DIR, 'store-views.json');
 const SECTIONS_FILE = path.join(DATA_DIR, 'store-services.json');
 const ORDERS_FILE = path.join(DATA_DIR, 'store-orders.json');
 const CONFIG_FILE = path.join(DATA_DIR, 'store-config.json');
@@ -114,6 +115,71 @@ function loadOrders() { return loadJSON(ORDERS_FILE, { orders: [] }); }
 function loadChats() { return loadJSON(CHATS_FILE, { chats: {} }); }
 function loadUsers() { return loadJSON(USERS_FILE, { users: {} }); }
 function loadDiscounts() { return loadJSON(DISCOUNTS_FILE, { codes: [] }); }
+function loadViews() { return loadJSON(VIEWS_FILE, { views: {} }); }
+function saveViews(data) { saveJSON(VIEWS_FILE, data); }
+function getCustomerView(userId) { return (loadViews().views || {})[String(userId)] || null; }
+function setCustomerView(userId, messageId) {
+    const d = loadViews();
+    if (messageId) d.views[String(userId)] = messageId;
+    else delete d.views[String(userId)];
+    saveViews(d);
+}
+async function deleteMsg(telegram, chatId, messageId) {
+    if (!messageId) return;
+    try { await telegram.deleteMessage(chatId, messageId); } catch (e) {}
+    // Keep the clear-chat list honest: a message already deleted here must
+    // not be counted as a failure when the admin clears the chat later.
+    try {
+        const chats = loadChats();
+        const list = chats.chats[String(chatId)] || [];
+        const i = list.indexOf(messageId);
+        if (i >= 0) { list.splice(i, 1); saveChats(chats); }
+    } catch (e) {}
+}
+// Show a customer step as the single message on screen: edit the current
+// view in place when the tapped button sits on it, otherwise delete the old
+// view and the stale message and send a fresh one. Mirrors the admin side.
+async function showCustomer(ctx, text, keyboard) {
+    const userId = String(ctx.from.id);
+    const cbMsg = ctx.callbackQuery && ctx.callbackQuery.message;
+    const viewId = getCustomerView(userId);
+    if (cbMsg && viewId && cbMsg.message_id === viewId) {
+        try { await ctx.editMessageText(text, { parse_mode: 'Markdown', ...(keyboard || {}) }); return true; }
+        catch (e) { if (String(e && e.message || '').includes('message is not modified')) return true; }
+    }
+    if (viewId && (!cbMsg || cbMsg.message_id !== viewId)) await deleteMsg(ctx.telegram, userId, viewId);
+    if (cbMsg && cbMsg.message_id !== viewId) await deleteMsg(ctx.telegram, userId, cbMsg.message_id);
+    try {
+        const sent = await ctx.reply(text, { parse_mode: 'Markdown', ...(keyboard || {}) });
+        if (sent && sent.message_id) setCustomerView(userId, sent.message_id);
+        return true;
+    } catch (e) {
+        try { const sent = await ctx.reply(text.replace(/[*_`]/g, ''), { ...(keyboard || {}) }); if (sent && sent.message_id) setCustomerView(userId, sent.message_id); return true; } catch (_) { return false; }
+    }
+}
+// Reply to a plain customer message as the single view (prompts, confirmations).
+async function replyCustomer(ctx, text, extra, parseMode) {
+    const userId = String(ctx.from.id);
+    const viewId = getCustomerView(userId);
+    if (viewId) await deleteMsg(ctx.telegram, userId, viewId);
+    try {
+        const sent = await ctx.reply(text, { parse_mode: parseMode || 'Markdown', ...(extra || {}) });
+        if (sent && sent.message_id) setCustomerView(userId, sent.message_id);
+        return sent;
+    } catch (e) {
+        try { const sent = await ctx.reply(text.replace(/[*_`]/g, ''), { ...(extra || {}) }); if (sent && sent.message_id) setCustomerView(userId, sent.message_id); return sent; } catch (_) { return null; }
+    }
+}
+// Send a proactive bot message to a customer as their single view.
+async function sendCustomerView(telegram, userId, text, extra, parseMode) {
+    const viewId = getCustomerView(userId);
+    if (viewId) await deleteMsg(telegram, userId, viewId);
+    try {
+        const sent = await telegram.sendMessage(userId, text, { parse_mode: parseMode || 'Markdown', ...(extra || {}) });
+        if (sent && sent.message_id) setCustomerView(userId, sent.message_id);
+        return sent;
+    } catch (e) { return null; }
+}
 function saveDiscounts(data) { saveJSON(DISCOUNTS_FILE, data); }
 // Apply a percentage discount to every number in a free-text price,
 // e.g. "1$ أو 150 ليرة سورية" at 10% -> "0.9$ أو 135 ليرة سورية".
@@ -231,7 +297,7 @@ async function kvSet(state) {
     } catch (e) { console.error('KV set error', e && e.message); return false; }
 }
 function readLocalState() {
-    return { sections: loadSections(), orders: loadOrders(), config: loadConfig(), chats: loadChats(), users: loadUsers(), discounts: loadDiscounts() };
+    return { sections: loadSections(), orders: loadOrders(), config: loadConfig(), chats: loadChats(), users: loadUsers(), discounts: loadDiscounts(), views: loadViews() };
 }
 function writeLocalState(state) {
     if (state.sections) saveJSON(SECTIONS_FILE, state.sections);
@@ -240,6 +306,7 @@ function writeLocalState(state) {
     if (state.chats) saveJSON(CHATS_FILE, state.chats);
     if (state.users) saveJSON(USERS_FILE, state.users);
     if (state.discounts) saveJSON(DISCOUNTS_FILE, state.discounts);
+    if (state.views) saveJSON(VIEWS_FILE, state.views);
 }
 async function syncFromKV() {
     if (!KV_URL || !KV_TOKEN) return;
@@ -390,21 +457,21 @@ function homeText() {
 
 bot.catch((err) => console.error('Bot error:', err));
 
-bot.start((ctx) => ctx.reply(homeText(), { parse_mode: 'Markdown', ...homeKeyboard() }));
-bot.command('store', (ctx) => ctx.reply(homeText(), { parse_mode: 'Markdown', ...homeKeyboard() }));
+bot.start(async (ctx) => { await replyCustomer(ctx, homeText(), homeKeyboard()); });
+bot.command('store', async (ctx) => { await replyCustomer(ctx, homeText(), homeKeyboard()); });
 bot.command('resetorders', (ctx) => {
     if (!isAdmin(ctx)) return;
     saveJSON(ORDERS_FILE, { orders: [] });
     return ctx.reply('تم تصفير الطلبات، البوت صار نظيف، ما في طلبات معلقة.', { parse_mode: 'Markdown', ...adminKeyboard() });
 });
-bot.command('cancel', (ctx) => {
+bot.command('cancel', async (ctx) => {
     if (isAdmin(ctx)) return ctx.reply('تم الإلغاء، رجعت للوحة التحكم.', { parse_mode: 'Markdown', ...adminKeyboard() });
-    return ctx.reply('تم الإلغاء، رجعت للقائمة الرئيسية.', { parse_mode: 'Markdown', ...homeKeyboard() });
+    await replyCustomer(ctx, 'تم الإلغاء، رجعت للقائمة الرئيسية.', homeKeyboard());
 });
 bot.action('cancel', async (ctx) => {
     await safeAnswer(ctx, 'تم الإلغاء');
     if (isAdmin(ctx)) return showAdminView(ctx, adminText(), adminKeyboard());
-    return safeEdit(ctx, homeText(), homeKeyboard());
+    return showCustomer(ctx, homeText(), homeKeyboard());
 });
 function adminPromptKeyboard() {
     return Markup.inlineKeyboard([
@@ -485,26 +552,24 @@ bot.command('setpayment', (ctx) => {
 bot.command('myorders', (ctx) => {
     const { orders } = loadOrders();
     const mine = orders.filter((o) => o.userId === String(ctx.from.id));
-    if (!mine.length) return ctx.reply('لسه ما عندك طلبات.', { parse_mode: 'Markdown', ...homeKeyboard() });
+    if (!mine.length) return replyCustomer(ctx, 'لسه ما عندك طلبات.', homeKeyboard());
     const list = mine.slice(-10).map((o) => `• ${o.serviceTitle} - ${o.price || ''} - ${o.status === 'pending' ? 'قيد التنفيذ، بانتظار التأكد من الدفع' : o.status === 'confirmed' ? 'تم تأكيد الدفع' : 'مرفوض'}`).join('\n');
-    return ctx.reply('📦 **طلباتي:**\n\n' + list, { parse_mode: 'Markdown', ...homeKeyboard() });
+    return replyCustomer(ctx, '📦 **طلباتي:**\n\n' + list, homeKeyboard());
 });
 
 bot.action('myorders', async (ctx) => {
     await safeAnswer(ctx);
     const { orders } = loadOrders();
     const mine = orders.filter((o) => o.userId === String(ctx.from.id));
-    if (!mine.length) return safeEdit(ctx, '📦 **طلباتي**\n\nلسه ما عندك طلبات.', homeKeyboard());
+    if (!mine.length) return showCustomer(ctx, '📦 **طلباتي**\n\nلسه ما عندك طلبات.', homeKeyboard());
     const list = mine.slice(-10).map((o) => `• ${o.serviceTitle} - ${o.price || ''} - ${o.txNumber ? 'معاملة: `' + o.txNumber + '` - ' : ''}${o.status === 'pending' ? 'قيد التنفيذ، بانتظار التأكد من الدفع' : o.status === 'confirmed' ? 'تم تأكيد الدفع' : 'مرفوض'}`).join('\n');
     await safeAnswer(ctx, `عندك ${mine.length} طلبات`);
-    const ok = await safeEdit(ctx, '📦 **طلباتي:**\n\n' + list, homeKeyboard());
-    if (!ok) return ctx.reply('📦 **طلباتي:**\n\n' + list, { parse_mode: 'Markdown', ...homeKeyboard() });
-    return ok;
+    return showCustomer(ctx, '📦 **طلباتي:**\n\n' + list, homeKeyboard());
 });
 
 bot.action('home', async (ctx) => {
     await safeAnswer(ctx);
-    return safeEdit(ctx, homeText(), homeKeyboard());
+    return showCustomer(ctx, homeText(), homeKeyboard());
 });
 
 bot.action(/^cat:(.+)$/, async (ctx) => {
@@ -512,8 +577,8 @@ bot.action(/^cat:(.+)$/, async (ctx) => {
     await safeAnswer(ctx);
     const { sections } = loadSections();
     const list = sections.filter((s) => ((s.category || 'عام').trim() || 'عام') === cat);
-    if (!list.length) return safeEdit(ctx, 'ما في خدمات بهالتصنيف بعد.', homeKeyboard());
-    return safeEdit(ctx, `🗂️ **${cat}**\n\nاختار الخدمة:`, categoryKeyboard(cat));
+    if (!list.length) return showCustomer(ctx, 'ما في خدمات بهالتصنيف بعد.', homeKeyboard());
+    return showCustomer(ctx, `🗂️ **${cat}**\n\nاختار الخدمة:`, categoryKeyboard(cat));
 });
 
 bot.action(/^section:(.+)$/, async (ctx) => {
@@ -521,11 +586,11 @@ bot.action(/^section:(.+)$/, async (ctx) => {
     const { sections } = loadSections();
     const sec = sections.find((s) => s.id === id);
     await safeAnswer(ctx);
-    if (!sec) return safeEdit(ctx, 'هاد القسم مو موجود.', homeKeyboard());
+    if (!sec) return showCustomer(ctx, 'هاد القسم مو موجود.', homeKeyboard());
     const priceLine = sec.price ? `\n💰 السعر: ${sec.price}` : '';
     const rating = serviceRating(sec.id);
     const ratingLine = rating ? `\n⭐ التقييم: ${rating.avg} (${rating.count} تقييم)` : '';
-    return safeEdit(ctx, `**${sec.title}**\n\n${sec.text || ''}${priceLine}${ratingLine}`, Markup.inlineKeyboard([
+    return showCustomer(ctx, `**${sec.title}**\n\n${sec.text || ''}${priceLine}${ratingLine}`, Markup.inlineKeyboard([
         [Markup.button.callback('✅ تأكيد الطلب', `order:${sec.id}`)],
         [Markup.button.callback('🎟️ كود خصم', `discount:${sec.id}`)],
         [Markup.button.callback('❌ إلغاء', 'cancel')],
@@ -538,17 +603,12 @@ bot.action(/^discount:(.+)$/, async (ctx) => {
     const { sections } = loadSections();
     const sec = sections.find((s) => s.id === id);
     await safeAnswer(ctx);
-    if (!sec) return safeEdit(ctx, 'هاد القسم مو موجود.', homeKeyboard());
+    if (!sec) return showCustomer(ctx, 'هاد القسم مو موجود.', homeKeyboard());
     // The service id contains an underscore (sec_offer1), which breaks
     // Telegram Markdown parsing when bare, so it must be inside backticks.
     // Same class of bug as the pay prompt in PR #15.
     const promptText = `🎟️ **كود خصم**\n\nالخدمة: ${sec.title}\nالسعر: ${sec.price || '-'}\n\nأرسل كود الخصم:\n\nمعرف الخدمة: \`${sec.id}\``;
-    try {
-        return await ctx.reply(promptText, { parse_mode: 'Markdown', ...Markup.forceReply() });
-    } catch (e) {
-        // If Telegram still rejects the formatting, send it plain.
-        return ctx.reply(promptText.replace(/[*`]/g, ''), Markup.forceReply());
-    }
+    return replyCustomer(ctx, promptText, Markup.forceReply());
 });
 
 bot.action(/^order:(.+)$/, async (ctx) => {
@@ -558,14 +618,14 @@ bot.action(/^order:(.+)$/, async (ctx) => {
     const { sections } = loadSections();
     const sec = sections.find((s) => s.id === id);
     await safeAnswer(ctx);
-    if (!sec) return safeEdit(ctx, 'هاد القسم مو موجود.', homeKeyboard());
+    if (!sec) return showCustomer(ctx, 'هاد القسم مو موجود.', homeKeyboard());
     const cfg = loadConfig();
     const disc = findDiscount(code);
     const discOk = disc && discountApplies(disc, sec.id) ? disc : null;
     const priceAfter = discOk ? applyDiscount(sec.price || '', discOk.percent) : (sec.price || '');
     const priceLine = sec.price ? `\n💰 السعر: ${sec.price}` : '';
     const discLine = discOk ? `\n🎟️ كود ${discOk.code}: خصم ${discOk.percent}%\n💰 السعر بعد الخصم: ${priceAfter}` : '';
-    return safeEdit(ctx,
+    return showCustomer(ctx,
         `💳 **صفحة الدفع**\n\n**${sec.title}**${priceLine}${discLine}\n\n${cfg.paymentInfo}`,
         Markup.inlineKeyboard([
             [Markup.button.callback('💳 تأكيد الدفع', `pay:${sec.id}${discOk ? ':' + discOk.code : ''}`)],
@@ -611,8 +671,9 @@ bot.action(/^pay:(.+)$/, async (ctx) => {
                 { parse_mode: 'HTML', ...orderActionKeyboard(order) });
         } catch (e) { console.error('Admin notify failed:', e && e.message); }
     }
-    // Edit the SAME payment message in place to ask for the transaction number.
-    return safeEdit(ctx,
+    // The payment message is the current view: edit it in place to ask for
+    // the transaction number (or replace it if the button sat on a stale one).
+    return showCustomer(ctx,
         `⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${sec.title}\nالسعر: ${sec.price || ''}\nرقم الطلب: \`${orderId}\`\n\nإذا بدك، أرسل رقم المعاملة أو صورة إيصال الدفع:`,
         Markup.inlineKeyboard([
             [Markup.button.callback('❌ إلغاء الطلب', 'cancel')]
@@ -704,10 +765,9 @@ bot.action(/^approve:(.+)$/, async (ctx) => {
     }
     order.status = 'confirmed';
     saveJSON(ORDERS_FILE, data);
-    try { await ctx.telegram.sendMessage(order.userId, `✅ تم تأكيد الدفع واستلام طلبك: ${order.serviceTitle}\n\nطلبك قيد التنفيذ، شكراً لثقتك.`); } catch (e) {}
-    try {
-        await ctx.telegram.sendMessage(order.userId, `⭐ قيّم تجربتك معنا\n\nخدمة: ${order.serviceTitle}\n\nكيف كانت تجربتك؟`, { ...Markup.inlineKeyboard([[1, 2, 3, 4, 5].map((n) => Markup.button.callback('⭐'.repeat(n), `rate:${orderId}:${n}`))]) });
-    } catch (e) {}
+    // One message only: confirmation + rating request together, as the
+    // customer's single view, so the chat never stacks two bot messages.
+    await sendCustomerView(ctx.telegram, order.userId, `✅ تم تأكيد الدفع واستلام طلبك: ${order.serviceTitle}\n\nطلبك قيد التنفيذ، شكراً لثقتك.\n\n⭐ قيّم تجربتك معنا: كيف كانت تجربتك؟`, Markup.inlineKeyboard([[1, 2, 3, 4, 5].map((n) => Markup.button.callback('⭐'.repeat(n), `rate:${orderId}:${n}`))]));
     const nav = (ctx.callbackQuery && ctx.callbackQuery.message && ctx.callbackQuery.message.reply_markup && JSON.stringify(ctx.callbackQuery.message.reply_markup).includes('admin:orders'));
     return safeEditHtml(ctx, orderDetailText(order), nav ? orderDetailKeyboard(order, 'orders') : orderActionKeyboard(order));
 });
@@ -740,7 +800,7 @@ bot.action(/^reject:(.+)$/, async (ctx) => {
     }
     order.status = 'rejected';
     saveJSON(ORDERS_FILE, data);
-    try { await ctx.telegram.sendMessage(order.userId, `❌ تم رفض طلبك: ${order.serviceTitle}\n\nتواصل مع الأدمن للتفاصيل.`); } catch (e) {}
+    await sendCustomerView(ctx.telegram, order.userId, `❌ تم رفض طلبك: ${order.serviceTitle}\n\nتواصل مع الأدمن للتفاصيل.`, homeKeyboard());
     const nav = (ctx.callbackQuery && ctx.callbackQuery.message && ctx.callbackQuery.message.reply_markup && JSON.stringify(ctx.callbackQuery.message.reply_markup).includes('admin:orders'));
     return safeEditHtml(ctx, orderDetailText(order), nav ? orderDetailKeyboard(order, 'orders') : orderActionKeyboard(order));
 });
@@ -1093,18 +1153,18 @@ bot.on('text', async (ctx, next) => {
             const secId = m ? m[1].replace(/`/g, '').trim() : '';
             const { sections } = loadSections();
             const sec = sections.find((s) => s.id === secId);
-            if (!sec) return ctx.reply('الخدمة مو موجودة، ابدأ من جديد بأمر /start');
+            if (!sec) return replyCustomer(ctx, 'الخدمة مو موجودة، ابدأ من جديد بأمر /start', homeKeyboard());
             const disc = findDiscount(text);
-            if (!disc) return ctx.reply('الكود مو صحيح أو منتهي، تأكد وحاول مرة تانية.', { parse_mode: 'Markdown', ...homeKeyboard() });
-            if (!discountApplies(disc, sec.id)) return ctx.reply('هاد الكود مو صالح لهالخدمة، هو مخصص لخدمة تانية.', { parse_mode: 'Markdown', ...homeKeyboard() });
+            if (!disc) return replyCustomer(ctx, 'الكود مو صحيح أو منتهي، تأكد وحاول مرة تانية.', homeKeyboard());
+            if (!discountApplies(disc, sec.id)) return replyCustomer(ctx, 'هاد الكود مو صالح لهالخدمة، هو مخصص لخدمة تانية.', homeKeyboard());
             const priceAfter = applyDiscount(sec.price || '', disc.percent);
             const rating = serviceRating(sec.id);
             const ratingLine = rating ? `\n⭐ التقييم: ${rating.avg} (${rating.count} تقييم)` : '';
-            return ctx.reply(`**${sec.title}**\n\n${sec.text || ''}\n💰 السعر: ${sec.price || ''}\n🎟️ كود ${disc.code}: خصم ${disc.percent}%\n💰 السعر بعد الخصم: ${priceAfter}${ratingLine}`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard([
+            return replyCustomer(ctx, `**${sec.title}**\n\n${sec.text || ''}\n💰 السعر: ${sec.price || ''}\n🎟️ كود ${disc.code}: خصم ${disc.percent}%\n💰 السعر بعد الخصم: ${priceAfter}${ratingLine}`, Markup.inlineKeyboard([
                 [Markup.button.callback('✅ تأكيد الطلب', `order:${sec.id}:${disc.code}`)],
                 [Markup.button.callback('❌ إلغاء', 'cancel')],
                 [Markup.button.callback('🔙 رجوع', 'home')]
-            ]) });
+            ]));
         }
         let serviceId = '';
         if (replied.includes('أرسل رقم المعاملة')) {
@@ -1140,23 +1200,23 @@ bot.on('text', async (ctx, next) => {
                             ]) });
                     } catch (e) {}
                 }
-                return ctx.reply(`⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${pendingOrder.serviceTitle}\nرقم الطلب: \`${pendingOrder.id}\`\nرقم المعاملة: \`${text}\`\n\nرح نبلغك بس نتأكد من الدفع.`, { parse_mode: 'Markdown', ...homeKeyboard() });
+                return replyCustomer(ctx, `⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${pendingOrder.serviceTitle}\nرقم الطلب: \`${pendingOrder.id}\`\nرقم المعاملة: \`${text}\`\n\nرح نبلغك بس نتأكد من الدفع.`, homeKeyboard());
             }
             // Only customers with an order can message the admin. Anyone else
             // gets a polite reply pointing them to order first, and nothing
             // is forwarded, so random messages never reach the admin.
             const hasOrder = ordersData.orders.some((o) => o.userId === String(ctx.from.id));
             if (!hasOrder) {
-                return ctx.reply('للتواصل مع الأدمن لازم يكون عندك طلب أولاً.\n\nتصفح الخدمات واطلب اللي بيناسبك، وبعدها بتقدر تراسلنا بخصوص طلبك.', { parse_mode: 'Markdown', ...homeKeyboard() });
+                return replyCustomer(ctx, 'للتواصل مع الأدمن لازم يكون عندك طلب أولاً.\n\nتصفح الخدمات واطلب اللي بيناسبك، وبعدها بتقدر تراسلنا بخصوص طلبك.', homeKeyboard());
             }
             if (ADMIN_ID && text.length >= 3) {
                 try { await ctx.telegram.sendMessage(ADMIN_ID, `💬 رسالة من زبون\n\n${customerLine({ name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' '), username: ctx.from.username || '', userId: String(ctx.from.id) })}\n\nالرسالة: ${escapeHtml(text)}`, { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.url('فتح محادثة الزبون', `tg://user?id=${ctx.from.id}`)]]) }); } catch (e) {}
             }
-            return ctx.reply('تم إرسال رسالتك للأدمن، رح يرد عليك.', { parse_mode: 'Markdown', ...homeKeyboard() });
+            return replyCustomer(ctx, 'تم إرسال رسالتك للأدمن، رح يرد عليك.', homeKeyboard());
         }
         const { sections } = loadSections();
         const sec = sections.find((s) => s.id === serviceId);
-        if (!sec) return ctx.reply('الخدمة مو موجودة، ابدأ من جديد بأمر /start');
+        if (!sec) return replyCustomer(ctx, 'الخدمة مو موجودة، ابدأ من جديد بأمر /start', homeKeyboard());
         const ordersData = loadOrders();
         const orderId = 'ord_' + Date.now();
         const order = {
@@ -1177,7 +1237,7 @@ bot.on('text', async (ctx, next) => {
                     ]) });
             } catch (e) { console.error('Admin notify failed:', e.message); }
         }
-        return ctx.reply(`⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${sec.title}\nرقم الطلب: \`${orderId}\`\nرقم المعاملة: \`${text}\`\n\nرح نبلغك بس نتأكد من الدفع.`, { parse_mode: 'Markdown', ...homeKeyboard() });
+        return replyCustomer(ctx, `⏳ **تم استلام طلبك، الطلب قيد التنفيذ ريثما يتم التأكد من الدفع.**\n\nالخدمة: ${sec.title}\nرقم الطلب: \`${orderId}\`\nرقم المعاملة: \`${text}\`\n\nرح نبلغك بس نتأكد من الدفع.`, homeKeyboard());
     }
     if (!isAdmin(ctx)) return next();
     const text = ctx.message.text.trim();
@@ -1191,7 +1251,7 @@ bot.on('text', async (ctx, next) => {
         const order = data.orders.find((o) => o.id === orderId);
         if (!order) return ctx.reply('ما لقيت الطلب، ابدأ من جديد من لوحة الطلبات.');
         try {
-            await ctx.telegram.sendMessage(order.userId, `💬 رسالة من المتجر بخصوص طلبك (${order.serviceTitle}):\n\n${text}`);
+            await sendCustomerView(ctx.telegram, order.userId, `💬 رسالة من المتجر بخصوص طلبك (${order.serviceTitle}):\n\n${text}`, homeKeyboard());
             return ctx.reply(`تم إرسال رسالتك للزبون ${order.name || order.userId}.`, { parse_mode: 'Markdown', ...adminKeyboard() });
         } catch (e) {
             return ctx.reply('ما قدرت ابعت الرسالة للزبون، يمكن حظر البوت أو ما فتح المحادثة معه بعد.');
@@ -1277,16 +1337,16 @@ bot.on('photo', async (ctx) => {
                 await ctx.telegram.sendPhoto(ADMIN_ID, fileId, { caption: orderNotifyText(order) + '\n\n🖼️ إثبات دفع مرفق', parse_mode: 'HTML', ...orderActionKeyboard(order) });
             } catch (e) { console.error('Proof notify failed:', e.message); }
         }
-        return ctx.reply('تم استلام إثبات الدفع، رح نتأكد منو ونبلغك.', { parse_mode: 'Markdown', ...homeKeyboard() });
+        return replyCustomer(ctx, 'تم استلام إثبات الدفع، رح نتأكد منو ونبلغك.', homeKeyboard());
     }
     const hasOrder = ordersData.orders.some((o) => o.userId === uid);
     if (!hasOrder) {
-        return ctx.reply('للتواصل مع الأدمن لازم يكون عندك طلب أولاً.\n\nتصفح الخدمات واطلب اللي بيناسبك، وبعدها بتقدر تراسلنا بخصوص طلبك.', { parse_mode: 'Markdown', ...homeKeyboard() });
+        return replyCustomer(ctx, 'للتواصل مع الأدمن لازم يكون عندك طلب أولاً.\n\nتصفح الخدمات واطلب اللي بيناسبك، وبعدها بتقدر تراسلنا بخصوص طلبك.', homeKeyboard());
     }
     if (ADMIN_ID) {
         try { await ctx.telegram.sendPhoto(ADMIN_ID, fileId, { caption: `💬 صورة من زبون\n\n${customerLine({ name: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' '), username: ctx.from.username || '', userId: uid })}`, parse_mode: 'HTML' }); } catch (e) {}
     }
-    return ctx.reply('تم إرسال الصورة للأدمن، رح يرد عليك.', { parse_mode: 'Markdown', ...homeKeyboard() });
+    return replyCustomer(ctx, 'تم إرسال الصورة للأدمن، رح يرد عليك.', homeKeyboard());
 });
 
 bot.on('document', async (ctx) => {
