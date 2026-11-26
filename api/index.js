@@ -273,6 +273,18 @@ function paymentInfoHtml(method) {
     const info = paymentMethodInfo(method).replace(/`/g, '');
     return escapeHtml(info).replace(/(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{6,}/, '<pre>$&</pre>');
 }
+// The raw payment code (no formatting), for the real copy button.
+function paymentCode(method) {
+    const info = paymentMethodInfo(method).replace(/`/g, '');
+    const m = info.match(/(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{6,}/);
+    return m ? m[0] : info.trim();
+}
+// A real copy button: Telegram's copy_text button copies the text to the
+// clipboard when pressed. Telegraf has no helper for it, so the raw button
+// object is used.
+function copyCodeButton(label, code) {
+    return { text: label, copy_text: { text: code } };
+}
 function paymentMethodLabel(method) {
     return method === 'sham' ? '💵 شام كاش' : method === 'binance' ? '🟡 بينانس' : 'غير محددة';
 }
@@ -761,8 +773,9 @@ bot.action(/^method:(.+)$/, async (ctx) => {
     const discLine = discOk ? `\n🎟️ كود ${discOk.code}: خصم ${discOk.percent}%\n💰 السعر بعد الخصم: ${priceAfter}` : '';
     const codePart = discOk ? ':' + discOk.code : '';
     return showCustomer(ctx,
-        `💳 **صفحة الدفع - ${paymentMethodLabel(method)}**\n\n**${sec.title}**${priceLine}${discLine}\n\n${paymentInfoForMethod(method)}\n👆 كبس عالمربع لتنسخ الكود.\n\nادفع المبلغ المطلوب، وبعدها كبس "تأكيد الدفع".`,
+        `💳 **صفحة الدفع - ${paymentMethodLabel(method)}**\n\n**${sec.title}**${priceLine}${discLine}\n\n${paymentInfoForMethod(method)}\n👆 كبس زر "نسخ الكود" لتنسخو.\n\nادفع المبلغ المطلوب، وبعدها كبس "تأكيد الدفع".`,
         Markup.inlineKeyboard([
+            [copyCodeButton('📋 نسخ الكود', paymentCode(method))],
             [Markup.button.callback('💳 تأكيد الدفع', `pay:${sec.id}${codePart}:${method}`)],
             [Markup.button.callback('🔙 رجوع لطرق الدفع', `order:${sec.id}${codePart}`)],
             [Markup.button.callback('❌ إلغاء', 'home')]
@@ -1261,6 +1274,8 @@ bot.action('admin:payment', async (ctx) => {
     if (!isAdmin(ctx)) return;
     await safeAnswer(ctx);
     return showAdminView(ctx, `💳 <b>معلومات الدفع:</b>\n\n💵 <b>شام كاش:</b>\n${paymentInfoHtml('sham')}\n\n🟡 <b>بينانس:</b>\n${paymentInfoHtml('binance')}`, Markup.inlineKeyboard([
+        [copyCodeButton('📋 نسخ كود الشام', paymentCode('sham'))],
+        [copyCodeButton('📋 نسخ كود بينانس', paymentCode('binance'))],
         [Markup.button.callback('✏️ تعديل شام كاش', 'admin:edit_payment:sham')],
         [Markup.button.callback('✏️ تعديل بينانس', 'admin:edit_payment:binance')],
         [Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]
