@@ -565,6 +565,8 @@ function categoryKeyboard(cat) {
     return Markup.inlineKeyboard(rows);
 }
 function homeText() {
+    const cfg = loadConfig();
+    if (cfg.welcomeText) return cfg.welcomeText;
     const { sections } = loadSections();
     if (!sections.length) return '🛍️ **أهلاً فيك بمتجرنا!**\n\nلسه ما في خدمات معروضة حالياً، تابعنا قريباً.';
     return '🛍️ **أهلاً فيك بمتجرنا!**\n\nتصفح الأقسام من الأزرار تحت، واختار اللي بيناسبك.';
@@ -621,6 +623,20 @@ bot.command('delservice', async (ctx) => {
     saveJSON(SECTIONS_FILE, data);
     await refreshStoreViews(ctx.telegram);
     return ctx.reply(`تم حذف الخدمة "${removed.title}".`, { parse_mode: 'Markdown', ...adminKeyboard() });
+});
+bot.command('rename', async (ctx) => {
+    if (!isAdmin(ctx)) return ctx.reply('هاد الأمر للأدمن بس.');
+    const args = ctx.message.text.replace(/^\/rename\s*/, '').trim();
+    const parts = args.split('|').map((s) => s.trim());
+    const n = parseInt(parts[0], 10) - 1;
+    const data = loadSections();
+    if (isNaN(n) || !data.sections[n] || !parts[1]) return ctx.reply('الصيغة: /rename 1 | الاسم الجديد');
+    if (data.sections.some((s, i) => i !== n && s.title === parts[1])) return ctx.reply('في خدمة تانية بنفس الاسم، اختار اسم تاني.');
+    const oldTitle = data.sections[n].title;
+    data.sections[n].title = parts.slice(1).join(' | ');
+    saveJSON(SECTIONS_FILE, data);
+    await refreshStoreViews(ctx.telegram);
+    return ctx.reply(`تم تغيير اسم الخدمة من "${oldTitle}" إلى "${data.sections[n].title}".`, { parse_mode: 'Markdown', ...adminKeyboard() });
 });
 bot.command('setcat', async (ctx) => {
     if (!isAdmin(ctx)) return ctx.reply('هاد الأمر للأدمن بس.');
@@ -952,35 +968,83 @@ bot.action(/^reject:(.+)$/, async (ctx) => {
     return safeEditHtml(ctx, orderDetailText(order), nav ? orderDetailKeyboard(order, 'orders') : orderActionKeyboard(order));
 });
 
+// The panel is branched by specialty, so the main menu stays short:
+// services, orders, users, discount codes, payment info, stats, settings.
 function adminKeyboard() {
     return Markup.inlineKeyboard([
-        [Markup.button.callback('➕ إضافة خدمة / قسم', 'admin:add_section')],
-        [Markup.button.callback('✏️ تعديل نص خدمة', 'admin:edit_section')],
-        [Markup.button.callback('💰 تعديل سعر خدمة', 'admin:edit_price')],
-        [Markup.button.callback('🗑️ حذف خدمة', 'admin:del_section')],
-        [Markup.button.callback('📋 عرض الخدمات', 'admin:list_sections')],
-        [Markup.button.callback('🗂️ تصنيف خدمة', 'admin:set_cat')],
-        [Markup.button.callback('🎟️ أكواد الخصم', 'admin:discounts')],
-        [Markup.button.callback('📣 بث إعلاني', 'admin:broadcast')],
-        [Markup.button.callback('💳 معلومات الدفع', 'admin:payment')],
-        [Markup.button.callback('🧾 عرض الطلبات', 'admin:orders')],
-        [Markup.button.callback('⏳ طلبات غير مكتملة', 'admin:incomplete')],
-        [Markup.button.callback('📦 أرشيف الطلبات', 'admin:archive')],
+        [Markup.button.callback('🛍️ الخدمات', 'admin:services')],
+        [Markup.button.callback('🧾 الطلبات', 'admin:orders_menu')],
         [Markup.button.callback('👥 المستخدمين', 'admin:users')],
-        [Markup.button.callback('💳 تعديل معلومات الدفع', 'admin:set_payment')],
-        [Markup.button.callback('📊 إحصائيات', 'admin:stats')],
-        [Markup.button.callback('💾 نسخة احتياطية', 'admin:backup')],
+        [Markup.button.callback('🎟️ أكواد الخصم', 'admin:discounts')],
+        [Markup.button.callback('💳 معلومات الدفع', 'admin:payment')],
+        [Markup.button.callback('📊 الإحصائيات', 'admin:stats')],
+        [Markup.button.callback('⚙️ الإعدادات', 'admin:settings')],
         [Markup.button.callback('🏠 الرئيسية', 'home')]
     ]);
 }
+function servicesKeyboard() {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('➕ إضافة خدمة', 'admin:add_section')],
+        [Markup.button.callback('✏️ تغيير اسم خدمة', 'admin:rename_service')],
+        [Markup.button.callback('✏️ تعديل نص خدمة', 'admin:edit_section')],
+        [Markup.button.callback('💰 تعديل سعر خدمة', 'admin:edit_price')],
+        [Markup.button.callback('🗂️ تصنيف خدمة', 'admin:set_cat')],
+        [Markup.button.callback('🗑️ حذف خدمة', 'admin:del_section')],
+        [Markup.button.callback('📋 عرض الخدمات', 'admin:list_sections')],
+        [Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]
+    ]);
+}
+function ordersMenuKeyboard() {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('🧾 الطلبات بانتظار التأكد', 'admin:orders')],
+        [Markup.button.callback('⏳ طلبات غير مكتملة', 'admin:incomplete')],
+        [Markup.button.callback('📦 أرشيف الطلبات', 'admin:archive')],
+        [Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]
+    ]);
+}
+function settingsKeyboard() {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('✏️ تعديل رسالة الترحيب', 'admin:edit_welcome')],
+        [Markup.button.callback('💾 نسخة احتياطية', 'admin:backup')],
+        [Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]
+    ]);
+}
 function adminText() {
-    return '👑 <b>لوحة تحكم الأدمن</b>\n\nمن هون بتضيف خدمة، وبتعدل نصها وسعرها، وبتحذفها، وبتعدل معلومات الدفع، وبتشوف الطلبات وبتأكد الدفع. النسخة الاحتياطية بتاخدها من زر نسخة احتياطية وقت ما بدك.';
+    return '👑 <b>لوحة تحكم الأدمن</b>\n\nاختار القسم يلي بدك تديره:\n🛍️ الخدمات - إضافة وتعديل وحذف الخدمات\n🧾 الطلبات - المعلقة والغير مكتملة والأرشيف\n👥 المستخدمين - مين عم يستخدم البوت والبث الإعلاني\n🎟️ أكواد الخصم - إنشاء وتخصيص الأكواد\n💳 معلومات الدفع - الشام كاش والبينانس\n📊 الإحصائيات - نظرة شاملة على المتجر\n⚙️ الإعدادات - رسالة الترحيب والنسخة الاحتياطية';
 }
 
 bot.action('admin:home', async (ctx) => {
     if (!isAdmin(ctx)) return;
     await safeAnswer(ctx);
     return showAdminView(ctx, adminText(), adminKeyboard());
+});
+
+bot.action('admin:services', async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    await safeAnswer(ctx);
+    return showAdminView(ctx, '🛍️ <b>الخدمات:</b>\n\nمن هون بتضيف خدمة جديدة، وبتغيّر اسمها أو نصها أو سعرها أو تصنيفها، وبتحذفها.', servicesKeyboard());
+});
+bot.action('admin:orders_menu', async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    await safeAnswer(ctx);
+    return showAdminView(ctx, '🧾 <b>الطلبات:</b>\n\nالطلبات بانتظار التأكد، والطلبات يلي لسه ما وصلها إثبات دفع، والأرشيف للطلبات المؤكدة والمرفوضة.', ordersMenuKeyboard());
+});
+bot.action('admin:settings', async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    await safeAnswer(ctx);
+    return showAdminView(ctx, '⚙️ <b>الإعدادات:</b>\n\nرسالة الترحيب يلي بيشوفها الزبون أول ما يفتح البوت، والنسخة الاحتياطية للبيانات.', settingsKeyboard());
+});
+bot.action('admin:rename_service', async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const { sections } = loadSections();
+    await safeAnswer(ctx);
+    return showAdminView(ctx, '✏️ <b>تغيير اسم خدمة</b>\n\nأرسل أمر واحد بهالشكل:\n<code>/rename 1 | الاسم الجديد</code>\n\nالخدمات:\n' + (sections.map((s, i) => `${i + 1}. ${s.title}`).join('\n') || 'لا يوجد خدمات'), adminPromptKeyboard());
+});
+bot.action('admin:edit_welcome', async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    await safeAnswer(ctx);
+    const current = homeText().replace(/[*_`]/g, '');
+    return ctx.reply(`✏️ <b>تعديل رسالة الترحيب</b>\n\nالحالية:\n${escapeHtml(current)}\n\nأرسل رسالة الترحيب الجديدة:\n\nاكتب /cancel للإلغاء.`, { parse_mode: 'HTML', ...Markup.forceReply() });
 });
 
 bot.command('admin', async (ctx) => {
@@ -1024,22 +1088,22 @@ bot.action('admin:list_sections', async (ctx) => {
     if (!isAdmin(ctx)) return;
     const { sections } = loadSections();
     await safeAnswer(ctx);
-    if (!sections.length) return showAdminView(ctx, 'لسه ما في خدمات، ضيف أول خدمة من زر إضافة خدمة.', adminKeyboard());
-    return showAdminView(ctx, '📋 <b>الخدمات:</b>\n\n' + sections.map((s, i) => `${i + 1}. ${escapeHtml(s.title)}\n${escapeHtml(s.text || '')}\nالسعر: ${escapeHtml(s.price || '-')}`).join('\n\n'), adminKeyboard());
+    if (!sections.length) return showAdminView(ctx, 'لسه ما في خدمات، ضيف أول خدمة من زر إضافة خدمة.', servicesKeyboard());
+    return showAdminView(ctx, '📋 <b>الخدمات:</b>\n\n' + sections.map((s, i) => `${i + 1}. ${escapeHtml(s.title)}\n${escapeHtml(s.text || '')}\nالسعر: ${escapeHtml(s.price || '-')}`).join('\n\n'), servicesKeyboard());
 });
 bot.action('admin:orders', async (ctx) => {
     if (!isAdmin(ctx)) return;
     const { orders } = loadOrders();
     await safeAnswer(ctx);
-    if (!orders.length) return showAdminView(ctx, 'لسه ما في طلبات.', adminKeyboard());
+    if (!orders.length) return showAdminView(ctx, 'لسه ما في طلبات.', ordersMenuKeyboard());
     const recent = orders.filter((o) => o.status === 'pending').slice(-10);
-    if (!recent.length) return showAdminView(ctx, 'ما في طلبات بانتظار التأكد، كل الطلبات المؤكدة والمرفوضة صارت بالأرشيف.', Markup.inlineKeyboard([[Markup.button.callback('📦 أرشيف الطلبات', 'admin:archive')], [Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]]));
+    if (!recent.length) return showAdminView(ctx, 'ما في طلبات بانتظار التأكد، كل الطلبات المؤكدة والمرفوضة صارت بالأرشيف.', Markup.inlineKeyboard([[Markup.button.callback('📦 أرشيف الطلبات', 'admin:archive')], [Markup.button.callback('🔙 رجوع لقائمة الطلبات', 'admin:orders_menu')]]));
     const list = recent.map((o, i) => {
         return `${i + 1}. ${escapeHtml(o.serviceTitle)} - ${escapeHtml(o.price || '')} - ⏳ بانتظار التأكد${o.txNumber ? ' - معاملة: ' + escapeHtml(o.txNumber) : ''}\n   ${customerLine(o).replace(/\n/g, ' | ')}`;
     }).join('\n\n');
     const rows = recent.map((o, i) => [Markup.button.callback(`${i + 1}. ${o.serviceTitle} - بانتظار التأكد`, `admin:order:${o.id}`)]);
     rows.push([Markup.button.callback('📦 أرشيف الطلبات', 'admin:archive')]);
-    rows.push([Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]);
+    rows.push([Markup.button.callback('🔙 رجوع لقائمة الطلبات', 'admin:orders_menu')]);
     return showAdminView(ctx, '🧾 <b>الطلبات بانتظار التأكد:</b>\n\n' + list + '\n\nكبس على رقم الطلب مشان تفتح تفاصيلو وتديره.', Markup.inlineKeyboard(rows));
 });
 bot.action('admin:incomplete', async (ctx) => {
@@ -1048,10 +1112,10 @@ bot.action('admin:incomplete', async (ctx) => {
     await expireAwaitingProofOrders(ctx.telegram);
     const { orders } = loadOrders();
     const waiting = orders.filter((o) => o.status === 'awaiting_proof').slice(-20);
-    if (!waiting.length) return showAdminView(ctx, 'ما في طلبات غير مكتملة، كل الطلبات وصلها إثبات دفع أو تلغت.', adminKeyboard());
+    if (!waiting.length) return showAdminView(ctx, 'ما في طلبات غير مكتملة، كل الطلبات وصلها إثبات دفع أو تلغت.', ordersMenuKeyboard());
     const list = waiting.map((o, i) => `${i + 1}. ${escapeHtml(o.serviceTitle)} - ${escapeHtml(o.price || '')} - من ${new Date(o.createdAt).toLocaleString('ar-SY')}\n   ${customerLine(o).replace(/\n/g, ' | ')}`).join('\n\n');
     const rows = waiting.map((o, i) => [Markup.button.callback(`${i + 1}. ${o.serviceTitle}`, `admin:order:${o.id}`)]);
-    rows.push([Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]);
+    rows.push([Markup.button.callback('🔙 رجوع لقائمة الطلبات', 'admin:orders_menu')]);
     return showAdminView(ctx, '⏳ <b>طلبات غير مكتملة (بانتظار إثبات الدفع):</b>\n\n' + list + '\n\nهالطلبات لسه ما وصلها رقم معاملة ولا صورة إيصال، وبتتلغى لحالها بعد 24 ساعة.', Markup.inlineKeyboard(rows));
 });
 
@@ -1060,13 +1124,13 @@ bot.action('admin:archive', async (ctx) => {
     const { orders } = loadOrders();
     await safeAnswer(ctx);
     const done = orders.filter((o) => o.status !== 'pending').slice(-20);
-    if (!done.length) return showAdminView(ctx, 'الأرشيف فاضي، لسه ما في طلبات مؤكدة أو مرفوضة.', Markup.inlineKeyboard([[Markup.button.callback('🔙 رجوع للطلبات', 'admin:orders')], [Markup.button.callback('🏠 لوحة التحكم', 'admin:home')]]));
+    if (!done.length) return showAdminView(ctx, 'الأرشيف فاضي، لسه ما في طلبات مؤكدة أو مرفوضة.', Markup.inlineKeyboard([[Markup.button.callback('🔙 رجوع لقائمة الطلبات', 'admin:orders_menu')], [Markup.button.callback('🏠 لوحة التحكم', 'admin:home')]]));
     const list = done.map((o, i) => {
         const status = o.status === 'confirmed' ? '✅ مؤكد' : '❌ مرفوض';
         return `${i + 1}. ${escapeHtml(o.serviceTitle)} - ${escapeHtml(o.price || '')} - ${status}${o.txNumber ? ' - معاملة: ' + escapeHtml(o.txNumber) : ''}\n   ${customerLine(o).replace(/\n/g, ' | ')}`;
     }).join('\n\n');
     const rows = done.map((o, i) => [Markup.button.callback(`${i + 1}. ${o.serviceTitle} - ${o.status === 'confirmed' ? 'مؤكد' : 'مرفوض'}`, `admin:archive:${o.id}`)]);
-    rows.push([Markup.button.callback('🔙 رجوع للطلبات', 'admin:orders')]);
+    rows.push([Markup.button.callback('🔙 رجوع لقائمة الطلبات', 'admin:orders_menu')]);
     rows.push([Markup.button.callback('🏠 لوحة التحكم', 'admin:home')]);
     return showAdminView(ctx, '📦 <b>أرشيف الطلبات:</b>\n\n' + list + '\n\nكبس على رقم الطلب مشان تفتح تفاصيلو.', Markup.inlineKeyboard(rows));
 });
@@ -1095,6 +1159,7 @@ bot.action('admin:users', async (ctx) => {
     if (!users.length) return showAdminView(ctx, 'لسه ما في مستخدمين.', adminKeyboard());
     const list = users.map((u, i) => `${i + 1}. ${escapeHtml(u.name)} (${u.username ? '@' + escapeHtml(u.username) : 'بدون معرف'}) - طلبات: ${countUserOrders(u.userId)}`).join('\n');
     const rows = users.map((u, i) => [Markup.button.callback(`${i + 1}. ${u.name}`, `admin:user:${u.userId}`)]);
+    rows.push([Markup.button.callback('📣 بث إعلاني', 'admin:broadcast')]);
     rows.push([Markup.button.callback('🔙 رجوع للوحة التحكم', 'admin:home')]);
     return showAdminView(ctx, '👥 <b>المستخدمين:</b>\n\n' + list + '\n\nكبس على اسم المستخدم مشان تفتح تفاصيلو.', Markup.inlineKeyboard(rows));
 });
@@ -1291,7 +1356,7 @@ bot.action(/^admin:edit_payment:(sham|binance)$/, async (ctx) => {
 bot.action('admin:set_payment', async (ctx) => {
     if (!isAdmin(ctx)) return;
     await safeAnswer(ctx);
-    return showAdminView(ctx, '💳 <b>تعديل معلومات الدفع</b>\n\nأرسل أمر واحد بهالشكل:\n<code>/setpayment معلومات الدفع الجديدة</code>\n\nالمعلومات الحالية:\n' + escapeHtml(loadConfig().paymentInfo.replace(/`/g, '')), adminPromptKeyboard());
+    return showAdminView(ctx, '💳 <b>تعديل معلومات الدفع</b>\n\nأرسل أمر واحد بهالشكل:\n<code>/setpayment sham | معلومات الشام كاش الجديدة</code>\nأو:\n<code>/setpayment binance | معلومات البينانس الجديدة</code>', adminPromptKeyboard());
 });
 bot.action('admin:stats', async (ctx) => {
     if (!isAdmin(ctx)) return;
@@ -1311,7 +1376,7 @@ bot.action('admin:backup', async (ctx) => {
     if (!isAdmin(ctx)) return;
     await safeAnswer(ctx);
     await backupToAdmin(ctx);
-    return showAdminView(ctx, 'تم إرسال النسخة الاحتياطية على الخاص.', adminKeyboard());
+    return showAdminView(ctx, 'تم إرسال النسخة الاحتياطية على الخاص.', settingsKeyboard());
 });
 
 function parseField(text, label) {
@@ -1471,6 +1536,14 @@ bot.on('text', async (ctx, next) => {
             [Markup.button.callback('✅ إرسال للكل', 'broadcast:send')],
             [Markup.button.callback('❌ إلغاء', 'broadcast:cancel')]
         ]));
+    }
+    // Replying to the welcome-text prompt -> save it and refresh the store live
+    if (replied.includes('أرسل رسالة الترحيب الجديدة')) {
+        const cfg = loadConfig();
+        cfg.welcomeText = text;
+        saveJSON(CONFIG_FILE, cfg);
+        await refreshStoreViews(ctx.telegram);
+        return ctx.reply('تم تعديل رسالة الترحيب، وظهرت عند الزباين فوراً.', { parse_mode: 'Markdown', ...adminKeyboard() });
     }
     // Step 3: replying to the price prompt -> create the service
     if (replied.includes('أرسل سعر الخدمة')) {
