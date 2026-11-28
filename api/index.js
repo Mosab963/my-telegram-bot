@@ -1,5 +1,6 @@
 const { Telegraf, Markup, Telegram } = require('telegraf');
 const fs = require('fs');
+const muse = require('../lib/muse');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 // Record every outgoing bot message to a customer (not to the admin).
@@ -469,6 +470,9 @@ async function showAdminView(ctx, text, keyboard) {
 }
 function orderActionKeyboard(o) {
     const rows = [];
+    if (o.status === 'fulfill_failed') {
+        rows.push([Markup.button.callback('🔁 إعادة محاولة التسليم الأوتوماتيك', `retry:${o.id}`)]);
+    }
     if (o.status === 'pending') {
         rows.push([Markup.button.callback('✅ تأكيد الدفع واستلام الطلب', `approve:${o.id}`)]);
         rows.push([Markup.button.callback('❌ رفض الطلب', `reject:${o.id}`)]);
@@ -480,6 +484,9 @@ function orderActionKeyboard(o) {
 }
 function orderDetailKeyboard(o, from) {
     const rows = [];
+    if (o.status === 'fulfill_failed') {
+        rows.push([Markup.button.callback('🔁 إعادة محاولة التسليم الأوتوماتيك', `retry:${o.id}`)]);
+    }
     if (o.status === 'pending') {
         rows.push([Markup.button.callback('✅ تأكيد الدفع واستلام الطلب', `approve:${o.id}`)]);
         rows.push([Markup.button.callback('❌ رفض الطلب', `reject:${o.id}`)]);
@@ -493,7 +500,7 @@ function orderDetailKeyboard(o, from) {
     return Markup.inlineKeyboard(rows);
 }
 function orderDetailText(o) {
-    const status = o.status === 'confirmed' ? '✅ مؤكد' : o.status === 'rejected' ? '❌ مرفوض' : o.status === 'awaiting_proof' ? '⏳ بانتظار إثبات الدفع' : o.status === 'expired' ? '🕐 ملغي (ما وصل إثبات دفع)' : '⏳ بانتظار التأكد من الدفع';
+    const status = o.status === 'fulfilling' ? '⚙️ قيد التسليم الأوتوماتيك' : o.status === 'fulfill_failed' ? '⚠️ فشل التسليم الأوتوماتيك، بدو تدخل منك' : o.status === 'confirmed' ? (o.fulfillment && o.fulfillment.state === 'delivered' ? '✅ مؤكد وتم التسليم أوتوماتيك' : '✅ مؤكد') : o.status === 'rejected' ? '❌ مرفوض' : o.status === 'awaiting_proof' ? '⏳ بانتظار إثبات الدفع' : o.status === 'expired' ? '🕐 ملغي (ما وصل إثبات دفع)' : '⏳ بانتظار التأكد من الدفع';
     const tx = o.txNumber ? `\nرقم المعاملة: <code>${escapeHtml(o.txNumber)}</code>` : '\nرقم المعاملة: لم يرسل بعد';
     const disc = o.discountCode ? `\n🎟️ كود خصم: <code>${escapeHtml(o.discountCode)}</code> (خصم ${o.discountPercent}%) - السعر قبل الخصم: ${escapeHtml(o.priceBefore || '')}` : '';
     const methodLine = o.paymentMethod ? `\n💳 طريقة الدفع: ${paymentMethodLabel(o.paymentMethod)}` : '';
@@ -692,7 +699,7 @@ bot.command('myorders', (ctx) => {
     const { orders } = loadOrders();
     const mine = orders.filter((o) => o.userId === String(ctx.from.id));
     if (!mine.length) return replyCustomer(ctx, 'لسه ما عندك طلبات.', homeKeyboard());
-    const list = mine.slice(-10).map((o) => `• ${o.serviceTitle} - ${o.price || ''} - ${o.status === 'awaiting_proof' ? 'بانتظار إثبات الدفع، أرسل رقم المعاملة أو صورة الإيصال' : o.status === 'expired' ? 'ملغي (ما وصل إثبات دفع)' : o.status === 'awaiting_proof' ? 'بانتظار إثبات الدفع، أرسل رقم المعاملة أو صورة الإيصال' : o.status === 'expired' ? 'ملغي (ما وصل إثبات دفع)' : o.status === 'pending' ? 'قيد التنفيذ، بانتظار التأكد من الدفع' : o.status === 'confirmed' ? 'تم تأكيد الدفع' : 'مرفوض'}`).join('\n');
+    const list = mine.slice(-10).map((o) => `• ${o.serviceTitle} - ${o.price || ''} - ${o.status === 'awaiting_proof' ? 'بانتظار إثبات الدفع، أرسل رقم المعاملة أو صورة الإيصال' : o.status === 'expired' ? 'ملغي (ما وصل إثبات دفع)' : o.status === 'awaiting_proof' ? 'بانتظار إثبات الدفع، أرسل رقم المعاملة أو صورة الإيصال' : o.status === 'expired' ? 'ملغي (ما وصل إثبات دفع)' : o.status === 'pending' ? 'قيد التنفيذ، بانتظار التأكد من الدفع' : (o.status === 'fulfilling' || o.status === 'fulfill_failed') ? 'تم تأكيد الدفع، قيد التنفيذ' : o.status === 'confirmed' ? 'تم تأكيد الدفع' : 'مرفوض'}`).join('\n');
     return replyCustomer(ctx, '📦 **طلباتي:**\n\n' + list, homeKeyboard());
 });
 
@@ -701,7 +708,7 @@ bot.action('myorders', async (ctx) => {
     const { orders } = loadOrders();
     const mine = orders.filter((o) => o.userId === String(ctx.from.id));
     if (!mine.length) return showCustomer(ctx, '📦 **طلباتي**\n\nلسه ما عندك طلبات.', homeKeyboard());
-    const list = mine.slice(-10).map((o) => `• ${o.serviceTitle} - ${o.price || ''} - ${o.txNumber ? 'معاملة: `' + o.txNumber + '` - ' : ''}${o.status === 'pending' ? 'قيد التنفيذ، بانتظار التأكد من الدفع' : o.status === 'confirmed' ? 'تم تأكيد الدفع' : 'مرفوض'}`).join('\n');
+    const list = mine.slice(-10).map((o) => `• ${o.serviceTitle} - ${o.price || ''} - ${o.txNumber ? 'معاملة: `' + o.txNumber + '` - ' : ''}${o.status === 'pending' ? 'قيد التنفيذ، بانتظار التأكد من الدفع' : (o.status === 'fulfilling' || o.status === 'fulfill_failed') ? 'تم تأكيد الدفع، قيد التنفيذ' : o.status === 'confirmed' ? 'تم تأكيد الدفع' : 'مرفوض'}`).join('\n');
     await safeAnswer(ctx, `عندك ${mine.length} طلبات`);
     return showCustomer(ctx, '📦 **طلباتي:**\n\n' + list, homeKeyboard());
 });
@@ -926,13 +933,88 @@ bot.action(/^approve:(.+)$/, async (ctx) => {
         const nav = (ctx.callbackQuery && ctx.callbackQuery.message && ctx.callbackQuery.message.reply_markup && JSON.stringify(ctx.callbackQuery.message.reply_markup).includes('admin:orders'));
         return safeEditHtml(ctx, orderDetailText(order), nav ? orderDetailKeyboard(order, 'archive') : orderActionKeyboard(order));
     }
+    // MUSE: try automatic fulfilment first. Any reason it cannot run (disabled, no
+    // mapping, out of stock, below cost, low balance, provider down) falls through
+    // to the old manual flow below, unchanged.
+    let chk = { auto: false, reason: 'error' };
+    try { chk = await muse.checkAutoFulfil(order); } catch (e) { chk = { auto: false, reason: 'error: ' + (e && e.message) }; }
+    if (chk.auto) {
+        // Persist 'fulfilling' BEFORE calling the provider. A double tap or a Telegram
+        // retry then hits the status guard above and cannot place a second order.
+        order.status = 'fulfilling';
+        order.fulfillment = { state: 'fulfilling', productId: chk.mapping.productId, costUsd: chk.cost, sellUsd: chk.mapping.sellUsd, startedAt: new Date().toISOString() };
+        saveJSON(ORDERS_FILE, data);
+        await sendCustomerView(ctx.telegram, order.userId, `✅ تم تأكيد الدفع واستلام طلبك: ${order.serviceTitle}\n\n⚙️ عم نجهز طلبك هلأ، بيوصلك خلال لحظات.`, homeKeyboard());
+        return runFulfilment(ctx, orderId, chk.mapping);
+    }
+    order.fulfillment = { state: 'manual', reason: chk.reason };
     order.status = 'confirmed';
     saveJSON(ORDERS_FILE, data);
     // One message only: confirmation + rating request together, as the
     // customer's single view, so the chat never stacks two bot messages.
     await sendCustomerView(ctx.telegram, order.userId, `✅ تم تأكيد الدفع واستلام طلبك: ${order.serviceTitle}\n\nطلبك قيد التنفيذ، شكراً لثقتك.\n\n⭐ قيّم تجربتك معنا: كيف كانت تجربتك؟`, Markup.inlineKeyboard([[1, 2, 3, 4, 5].map((n) => Markup.button.callback('⭐'.repeat(n), `rate:${orderId}:${n}`))]));
     const nav = (ctx.callbackQuery && ctx.callbackQuery.message && ctx.callbackQuery.message.reply_markup && JSON.stringify(ctx.callbackQuery.message.reply_markup).includes('admin:orders'));
+    if (chk.reason && chk.reason !== 'disabled' && chk.reason !== 'no_mapping') {
+        try { await ctx.telegram.sendMessage(ADMIN_ID, `ℹ️ الطلب ${orderId} ما انسلم أوتوماتيك (${chk.reason}). نفذه يدوي.`); } catch (e) {}
+    }
     return safeEditHtml(ctx, orderDetailText(order), nav ? orderDetailKeyboard(order, 'orders') : orderActionKeyboard(order));
+});
+
+// Calls the provider for an order already in 'fulfilling' and settles it as
+// delivered ('confirmed') or fulfill_failed. Shared by approve and retry.
+async function runFulfilment(ctx, orderId, mapping) {
+    const nav = (ctx.callbackQuery && ctx.callbackQuery.message && ctx.callbackQuery.message.reply_markup && JSON.stringify(ctx.callbackQuery.message.reply_markup).includes('admin:orders'));
+    let result;
+    try { result = await muse.placeOrder(loadOrders().orders.find((o) => o.id === orderId), mapping); } catch (e) { result = { ok: false, error: String(e && e.message || e) }; }
+    const data = loadOrders();
+    const order = data.orders.find((o) => o.id === orderId);
+    if (!order) return;
+    const f = order.fulfillment || {};
+    f.finishedAt = new Date().toISOString();
+    if (result.ok) {
+        f.state = 'delivered';
+        f.providerOrderId = result.providerOrderId || null;
+        f.raw = String(result.raw || '').slice(0, 4000); // kept so nothing paid for is ever lost
+        order.fulfillment = f;
+        order.status = 'confirmed';
+        saveJSON(ORDERS_FILE, data);
+        // Plain text on purpose: account passwords contain _ * ` that break Markdown.
+        try {
+            if (result.deliveredText) await ctx.telegram.sendMessage(order.userId, `📦 طلبك جاهز: ${order.serviceTitle}\n\n${result.deliveredText}`);
+            else await ctx.telegram.sendMessage(order.userId, `📦 تم تجهيز طلبك: ${order.serviceTitle}\nالأدمن رح يبعتلك التفاصيل خلال لحظات.`);
+        } catch (e) {}
+        if (!result.deliveredText) {
+            try { await ctx.telegram.sendMessage(ADMIN_ID, `⚠️ الطلب ${orderId} انسلم من المزود بس ما قدرت أقرا نص التسليم. رد المزود الخام:\n${f.raw.slice(0, 3000)}\nابعتو للزبون يدوي.`); } catch (e) {}
+        }
+        try { await sendCustomerView(ctx.telegram, order.userId, `⭐ قيّم تجربتك معنا: كيف كانت تجربتك؟`, Markup.inlineKeyboard([[1, 2, 3, 4, 5].map((n) => Markup.button.callback('⭐'.repeat(n), `rate:${orderId}:${n}`))])); } catch (e) {}
+    } else {
+        f.state = 'failed';
+        f.error = String(result.error || 'unknown').slice(0, 300);
+        f.attempts = (f.attempts || 0) + 1;
+        order.fulfillment = f;
+        order.status = 'fulfill_failed';
+        saveJSON(ORDERS_FILE, data);
+        const warn = '\n\nإعادة المحاولة آمنة: المزود ما بيخصم مرتين لنفس الطلب، وما بيخصم إلا عند التسليم الفعلي.';
+        try { await ctx.telegram.sendMessage(ADMIN_ID, `❌ فشل التسليم الأوتوماتيك للطلب ${orderId} (${order.serviceTitle})\nالسبب: ${f.error}${warn}`); } catch (e) {}
+        // Customer is told nothing alarming: the order is simply still in progress.
+    }
+    return safeEditHtml(ctx, orderDetailText(order), nav ? orderDetailKeyboard(order, 'orders') : orderActionKeyboard(order));
+}
+
+bot.action(/^retry:(.+)$/, async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const orderId = ctx.match[1];
+    const data = loadOrders();
+    const order = data.orders.find((o) => o.id === orderId);
+    await safeAnswer(ctx, 'جاري إعادة المحاولة');
+    if (!order) return safeEdit(ctx, 'الطلب مو موجود.');
+    if (order.status !== 'fulfill_failed') return safeEditHtml(ctx, orderDetailText(order), orderActionKeyboard(order));
+    const chk = await muse.checkAutoFulfil(order);
+    if (!chk.auto) return safeEditHtml(ctx, orderDetailText(order) + `\n\n⚠️ ما فيني أعيد المحاولة هلأ: ${escapeHtml(chk.reason)}`, orderActionKeyboard(order));
+    order.status = 'fulfilling';
+    order.fulfillment = { ...(order.fulfillment || {}), state: 'fulfilling', retriedAt: new Date().toISOString() };
+    saveJSON(ORDERS_FILE, data);
+    return runFulfilment(ctx, orderId, chk.mapping);
 });
 bot.action(/^rate:(.+):([1-5])$/, async (ctx) => {
     const orderId = ctx.match[1];
@@ -1096,7 +1178,7 @@ bot.action('admin:orders', async (ctx) => {
     const { orders } = loadOrders();
     await safeAnswer(ctx);
     if (!orders.length) return showAdminView(ctx, 'لسه ما في طلبات.', ordersMenuKeyboard());
-    const recent = orders.filter((o) => o.status === 'pending').slice(-10);
+    const recent = orders.filter((o) => o.status === 'pending' || o.status === 'fulfilling' || o.status === 'fulfill_failed').slice(-10);
     if (!recent.length) return showAdminView(ctx, 'ما في طلبات بانتظار التأكد، كل الطلبات المؤكدة والمرفوضة صارت بالأرشيف.', Markup.inlineKeyboard([[Markup.button.callback('📦 أرشيف الطلبات', 'admin:archive')], [Markup.button.callback('🔙 رجوع لقائمة الطلبات', 'admin:orders_menu')]]));
     const list = recent.map((o, i) => {
         return `${i + 1}. ${escapeHtml(o.serviceTitle)} - ${escapeHtml(o.price || '')} - ⏳ بانتظار التأكد${o.txNumber ? ' - معاملة: ' + escapeHtml(o.txNumber) : ''}\n   ${customerLine(o).replace(/\n/g, ' | ')}`;
@@ -1123,7 +1205,7 @@ bot.action('admin:archive', async (ctx) => {
     if (!isAdmin(ctx)) return;
     const { orders } = loadOrders();
     await safeAnswer(ctx);
-    const done = orders.filter((o) => o.status !== 'pending').slice(-20);
+    const done = orders.filter((o) => o.status !== 'pending' && o.status !== 'fulfilling' && o.status !== 'fulfill_failed').slice(-20);
     if (!done.length) return showAdminView(ctx, 'الأرشيف فاضي، لسه ما في طلبات مؤكدة أو مرفوضة.', Markup.inlineKeyboard([[Markup.button.callback('🔙 رجوع لقائمة الطلبات', 'admin:orders_menu')], [Markup.button.callback('🏠 لوحة التحكم', 'admin:home')]]));
     const list = done.map((o, i) => {
         const status = o.status === 'confirmed' ? '✅ مؤكد' : '❌ مرفوض';
